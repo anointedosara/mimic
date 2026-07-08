@@ -1,10 +1,11 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Crown, X, Check, Wifi, WifiOff } from "lucide-react";
+import { Crown, X, Check, Wifi, WifiOff, Mic } from "lucide-react";
 import type { PublicPlayer } from "@/lib/game/types";
 import { AvatarDisplay } from "@/components/avatar-display";
 import { Badge } from "@/components/ui/badge";
+import { useVoiceStore } from "@/store/voice-store";
 import { cn } from "@/lib/utils";
 
 export function PlayerTile({
@@ -27,6 +28,8 @@ export function PlayerTile({
   disabled?: boolean;
 }) {
   const Comp = selectable ? "button" : "div";
+  const inVoice = useVoiceStore((s) => s.connectedUserIds.includes(player.userId));
+  const speaking = useVoiceStore((s) => Boolean(s.speaking[player.userId]));
   return (
     <motion.div layout initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }}>
       <Comp
@@ -47,8 +50,24 @@ export function PlayerTile({
           </Badge>
         )}
 
-        <div className="relative">
+        <div
+          className={cn(
+            "relative rounded-full transition-all",
+            speaking && "ring-2 ring-emerald-400 ring-offset-2 ring-offset-background",
+          )}
+        >
           <AvatarDisplay avatar={player.avatar} size="md" dimmed={!player.connected} />
+          {inVoice && (
+            <div
+              className={cn(
+                "absolute -bottom-1 -left-1 grid h-5 w-5 place-items-center rounded-full text-white shadow transition-colors",
+                speaking ? "bg-emerald-500" : "bg-primary/70",
+              )}
+              title={speaking ? "Speaking" : "In voice"}
+            >
+              <Mic className="h-3 w-3" />
+            </div>
+          )}
           {showVoted && player.hasVoted && (
             <div className="absolute -bottom-1 -right-1 grid h-6 w-6 place-items-center rounded-full bg-emerald-500 text-white shadow-lg">
               <Check className="h-4 w-4" />

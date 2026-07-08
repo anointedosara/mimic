@@ -8,6 +8,7 @@ import { Loader2, AlertTriangle } from "lucide-react";
 import { useRoom, roomActions } from "@/hooks/use-room";
 import { useGameStore } from "@/store/game-store";
 import { RoomBar } from "@/components/game/room-bar";
+import { VoiceBar } from "@/components/game/voice-bar";
 import { Lobby } from "@/components/game/lobby";
 import { RoleReveal } from "@/components/game/role-reveal";
 import { Discussion } from "@/components/game/discussion";
@@ -78,6 +79,12 @@ export default function RoomPage() {
     <div className="min-h-dvh">
       <div className="container max-w-5xl py-5">
         <RoomBar code={code} status={connStatus} onLeave={leave} />
+
+        {snapshot && (
+          <div className="mt-4">
+            <VoiceBar code={code} selfId={selfId} />
+          </div>
+        )}
 
         <div className="mt-6">
           {!snapshot ? (

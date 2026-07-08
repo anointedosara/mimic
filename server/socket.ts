@@ -14,7 +14,12 @@ interface SocketData {
   user: SocketUser;
   // Rooms this socket has joined (for cleanup on disconnect).
   joinedCodes: Set<string>;
+  // Voice meshes this socket is in (for peer-left cleanup on disconnect).
+  voiceCodes: Set<string>;
 }
+
+/** Socket.IO room name for a room's voice mesh. */
+const voiceRoom = (code: string) => `voice:${code}`;
 
 export function initSocketServer(httpServer: HTTPServer): IOServer {
   const io = new IOServer(httpServer, {
@@ -42,6 +47,7 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
         avatar: String(token.avatar ?? "fox"),
       };
       (socket.data as SocketData).joinedCodes = new Set();
+      (socket.data as SocketData).voiceCodes = new Set();
       next();
     } catch (err) {
       next(err as Error);
@@ -76,6 +82,10 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
       socket.leave(`room:${c}`);
       socket.leave(`user:${c}:${user.id}`);
       data.joinedCodes.delete(c);
+      if (data.voiceCodes.delete(c)) {
+        socket.leave(voiceRoom(c));
+        socket.to(voiceRoom(c)).emit("voice:peer-left", { socketId: socket.id });
+      }
       await manager.handleDisconnect(c, user.id);
     });
 
@@ -107,7 +117,56 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
       ack?.(await manager.handlePlayAgain(normalize(code), user.id));
     });
 
+    // --- Voice mesh (WebRTC signaling relay) --------------------------------
+    // The server only brokers signaling; audio flows peer-to-peer. Newcomers
+    // receive the existing roster and each existing peer is told to initiate an
+    // offer to the newcomer — so exactly one side offers per pair (no glare).
+    socket.on("voice:join", async ({ code }, ack) => {
+      const c = normalize(code);
+      if (!c) return ack?.({ ok: false, error: "Missing room code" });
+      if (!data.joinedCodes.has(c)) return ack?.({ ok: false, error: "Not in this room" });
+
+      const existing = await io.in(voiceRoom(c)).fetchSockets();
+      const peers = existing
+        .filter((s) => s.id !== socket.id)
+        .map((s) => {
+          const u = (s.data as SocketData).user;
+          return { socketId: s.id, userId: u.id, displayName: u.displayName, avatar: u.avatar };
+        });
+
+      socket.join(voiceRoom(c));
+      data.voiceCodes.add(c);
+
+      // Tell everyone already in the mesh to open a connection to us.
+      socket.to(voiceRoom(c)).emit("voice:peer-joined", {
+        socketId: socket.id,
+        userId: user.id,
+        displayName: user.displayName,
+        avatar: user.avatar,
+      });
+
+      ack?.({ ok: true, peers, selfSocketId: socket.id });
+    });
+
+    socket.on("voice:signal", ({ to, data: payload }) => {
+      if (!to) return;
+      // Relay verbatim to the target socket; tag it with our socket id.
+      io.to(String(to)).emit("voice:signal", { from: socket.id, data: payload });
+    });
+
+    socket.on("voice:leave", ({ code }) => {
+      const c = normalize(code);
+      if (!c) return;
+      socket.leave(voiceRoom(c));
+      data.voiceCodes.delete(c);
+      socket.to(voiceRoom(c)).emit("voice:peer-left", { socketId: socket.id });
+    });
+
     socket.on("disconnect", async () => {
+      // Tear down our voice connections for peers still in each mesh.
+      for (const c of data.voiceCodes) {
+        socket.to(voiceRoom(c)).emit("voice:peer-left", { socketId: socket.id });
+      }
       // Mark disconnected in every room this socket had joined.
       for (const c of data.joinedCodes) {
         // Only flip presence if no other socket for this user remains in the room.
