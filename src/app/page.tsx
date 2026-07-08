@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { motion } from "framer-motion";
-import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye } from "lucide-react";
+import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye, Smartphone, Wifi } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,17 @@ export default function HomePage() {
           <Button variant="outline" size="lg" className="w-full sm:w-auto" onClick={() => go("/join")}>
             <LogIn className="h-5 w-5" /> Join room
           </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full sm:w-auto"
+            onClick={() => {
+              playSound("click");
+              router.push("/pass-and-play");
+            }}
+          >
+            <Smartphone className="h-5 w-5" /> Pass &amp; Play
+          </Button>
         </motion.div>
 
         <motion.div
@@ -101,6 +112,70 @@ export default function HomePage() {
               {a.emoji}
             </motion.div>
           ))}
+        </div>
+      </section>
+
+      {/* Game modes */}
+      <section className="container mt-24">
+        <div className="text-center">
+          <h2 className="font-display text-3xl font-black sm:text-4xl">Two ways to play</h2>
+          <p className="mx-auto mt-2 max-w-md text-muted-foreground">
+            Everyone in the same room, or scattered across the world.
+          </p>
+        </div>
+        <div className="mt-8 grid gap-4 sm:grid-cols-2">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="glass card-hover flex flex-col rounded-2xl p-6"
+          >
+            <div className="mb-3 grid h-12 w-12 place-items-center rounded-xl bg-mimic-cyan/15 text-mimic-cyan">
+              <Wifi className="h-6 w-6" />
+            </div>
+            <h3 className="font-display text-xl font-bold">Online</h3>
+            <p className="mt-1 flex-1 text-sm text-muted-foreground">
+              Private room links and codes, real-time multiplayer across every device, with logins
+              and saved stats.
+            </p>
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <Button variant="gradient" className="flex-1" onClick={() => go("/create-room")}>
+                <PlusCircle className="h-4 w-4" /> Create room
+              </Button>
+              <Button variant="outline" className="flex-1" onClick={() => go("/join")}>
+                <LogIn className="h-4 w-4" /> Join
+              </Button>
+            </div>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ delay: 0.08 }}
+            className="glass card-hover flex flex-col rounded-2xl p-6"
+          >
+            <div className="mb-3 grid h-12 w-12 place-items-center rounded-xl bg-mimic-fuchsia/15 text-mimic-fuchsia">
+              <Smartphone className="h-6 w-6" />
+            </div>
+            <h3 className="font-display text-xl font-bold">Pass &amp; Play</h3>
+            <p className="mt-1 flex-1 text-sm text-muted-foreground">
+              Completely offline on one phone — no internet, no accounts. Pass the device around the
+              circle and blend in.
+            </p>
+            <div className="mt-4">
+              <Button
+                variant="gradient"
+                className="w-full"
+                onClick={() => {
+                  playSound("click");
+                  router.push("/pass-and-play");
+                }}
+              >
+                <Play className="h-4 w-4" /> Play on this device
+              </Button>
+            </div>
+          </motion.div>
         </div>
       </section>
 
