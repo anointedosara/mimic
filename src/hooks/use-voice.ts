@@ -7,11 +7,12 @@ import { voiceChannel, MSG } from "@/lib/ably/channels";
 import type { VoicePeer, VoiceSignal } from "@/lib/game/events";
 import { useVoiceStore } from "@/store/voice-store";
 
-// Public STUN only — a full mesh between friends behind typical home NATs works
-// without a TURN relay. (Symmetric-NAT users would need TURN; out of scope.)
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
+// Fallback ICE if /api/voice/ice can't be reached. Public STUN works when both
+// peers are reachable via their public address; peers on different networks
+// behind strict NATs need a TURN relay, which the server adds when configured
+// (see src/lib/voice/ice.ts). The real list is fetched on join().
+const FALLBACK_ICE: RTCIceServer[] = [
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
 ];
 
 const MIC_CONSTRAINTS: MediaStreamConstraints = {
@@ -50,6 +51,7 @@ export function useVoice(code: string, selfId: string) {
   const peersRef = useRef<Map<string, PeerConn>>(new Map());
   const rosterRef = useRef<Map<string, VoicePeer>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
+  const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analysersRef = useRef<
     Map<string, { analyser: AnalyserNode; data: Uint8Array<ArrayBuffer>; lastAbove: number }>
@@ -157,7 +159,7 @@ export function useVoice(code: string, selfId: string) {
       const existing = peersRef.current.get(connId);
       if (existing) return existing;
 
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
       const local = localStreamRef.current;
       if (local) for (const track of local.getTracks()) pc.addTrack(track, local);
 
@@ -260,6 +262,21 @@ export function useVoice(code: string, selfId: string) {
   }, [closePeer, store]);
 
   // --- public actions -------------------------------------------------------
+  // Fetch the server's ICE list (STUN + TURN when configured). Falls back to
+  // public STUN so voice still works on the same network if the call fails.
+  const loadIce = useCallback(async () => {
+    try {
+      const res = await fetch("/api/voice/ice", { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { iceServers?: RTCIceServer[] };
+      if (Array.isArray(data.iceServers) && data.iceServers.length) {
+        iceServersRef.current = data.iceServers;
+      }
+    } catch {
+      /* keep FALLBACK_ICE */
+    }
+  }, []);
+
   const doJoin = useCallback(async () => {
     const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
     localStreamRef.current = stream;
@@ -294,9 +311,25 @@ export function useVoice(code: string, selfId: string) {
 
   const join = useCallback(async () => {
     if (activeRef.current) return;
+
+    // WebRTC mic capture requires a secure context. This is the usual culprit
+    // when voice "does nothing" on a self-hosted box opened over http:// via a
+    // LAN IP — getUserMedia is silently unavailable outside HTTPS/localhost.
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      store
+        .getState()
+        .setStatus("error", "Voice needs a secure page — open the app over HTTPS (or on localhost).");
+      return;
+    }
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      store.getState().setStatus("error", "This browser can't access the microphone here.");
+      return;
+    }
+
     const s = store.getState();
     s.setStatus("connecting");
     try {
+      await loadIce();
       await doJoin();
       s.setMicOn(true);
       s.setStatus("active");
@@ -310,7 +343,7 @@ export function useVoice(code: string, selfId: string) {
             : "Could not start voice";
       store.getState().setStatus("error", msg);
     }
-  }, [store, doJoin, teardown]);
+  }, [store, loadIce, doJoin, teardown]);
 
   const leave = useCallback(() => {
     if (!activeRef.current) return;
