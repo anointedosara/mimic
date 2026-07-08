@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { getSocket, emitAck } from "@/lib/socket-client";
-import type { VoiceJoinAck, VoicePeer, VoiceSignal } from "@/lib/game/events";
+import type * as Ably from "ably";
+import { getAbly } from "@/lib/ably/client";
+import { voiceChannel, MSG } from "@/lib/ably/channels";
+import type { VoicePeer, VoiceSignal } from "@/lib/game/events";
 import { useVoiceStore } from "@/store/voice-store";
 
 // Public STUN only — a full mesh between friends behind typical home NATs works
@@ -29,10 +31,18 @@ interface PeerConn {
   remoteReady: boolean;
 }
 
+/** Signaling envelope published on the voice channel, addressed by connectionId. */
+interface VoiceEnvelope {
+  to: string;
+  from: string;
+  data: VoiceSignal;
+}
+
 /**
- * Full-mesh peer-to-peer voice for a room, using the Socket.IO server purely as
- * a signaling relay. Mic capture is opt-in via `join()` (needs a user gesture so
- * remote audio can autoplay). State for the UI lives in the voice store.
+ * Full-mesh peer-to-peer voice for a room, using an Ably channel for signaling
+ * and presence for peer discovery. Peers are keyed by Ably connectionId. Mic
+ * capture is opt-in via `join()` (needs a user gesture so remote audio can
+ * autoplay). State for the UI lives in the voice store.
  */
 export function useVoice(code: string, selfId: string) {
   const store = useVoiceStore;
@@ -50,6 +60,12 @@ export function useVoice(code: string, selfId: string) {
   selfIdRef.current = selfId;
 
   const upper = code.toUpperCase();
+
+  const channel = useCallback((): Ably.RealtimeChannel => {
+    return getAbly().channels.get(voiceChannel(upper));
+  }, [upper]);
+
+  const myConnId = () => getAbly().connection.id ?? "";
 
   // --- roster -> store ------------------------------------------------------
   const syncRoster = useCallback(() => {
@@ -106,17 +122,18 @@ export function useVoice(code: string, selfId: string) {
 
   const send = useCallback(
     (to: string, data: VoiceSignal) => {
-      getSocket().emit("voice:signal", { code: upper, to, data });
+      const envelope: VoiceEnvelope = { to, from: myConnId(), data };
+      void channel().publish(MSG.voiceSignal, envelope);
     },
-    [upper],
+    [channel],
   );
 
   // --- peer connection lifecycle -------------------------------------------
   const closePeer = useCallback(
-    (socketId: string) => {
-      const peer = peersRef.current.get(socketId);
+    (connId: string) => {
+      const peer = peersRef.current.get(connId);
       if (!peer) return;
-      peersRef.current.delete(socketId);
+      peersRef.current.delete(connId);
       try {
         peer.pc.ontrack = null;
         peer.pc.onicecandidate = null;
@@ -129,15 +146,15 @@ export function useVoice(code: string, selfId: string) {
       peer.audioEl.remove();
       analysersRef.current.delete(peer.userId);
       store.getState().setSpeaking(peer.userId, false);
-      rosterRef.current.delete(socketId);
+      rosterRef.current.delete(connId);
       syncRoster();
     },
     [store, syncRoster],
   );
 
   const getOrCreatePeer = useCallback(
-    (socketId: string, userId: string, initiator: boolean): PeerConn => {
-      const existing = peersRef.current.get(socketId);
+    (connId: string, userId: string, initiator: boolean): PeerConn => {
+      const existing = peersRef.current.get(connId);
       if (existing) return existing;
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -151,10 +168,10 @@ export function useVoice(code: string, selfId: string) {
       document.body.appendChild(audioEl);
 
       const peer: PeerConn = { pc, userId, audioEl, candidateQueue: [], remoteReady: false };
-      peersRef.current.set(socketId, peer);
+      peersRef.current.set(connId, peer);
 
       pc.onicecandidate = (e) => {
-        if (e.candidate) send(socketId, { kind: "ice", candidate: e.candidate.toJSON() });
+        if (e.candidate) send(connId, { kind: "ice", candidate: e.candidate.toJSON() });
       };
       pc.ontrack = (e) => {
         const [stream] = e.streams;
@@ -167,15 +184,15 @@ export function useVoice(code: string, selfId: string) {
       };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-          closePeer(socketId);
+          closePeer(connId);
         }
       };
 
       if (initiator) {
         pc.createOffer()
           .then((offer) => pc.setLocalDescription(offer).then(() => offer))
-          .then((offer) => send(socketId, { kind: "offer", sdp: offer }))
-          .catch(() => closePeer(socketId));
+          .then((offer) => send(connId, { kind: "offer", sdp: offer }))
+          .catch(() => closePeer(connId));
       }
       return peer;
     },
@@ -228,7 +245,7 @@ export function useVoice(code: string, selfId: string) {
 
   const teardown = useCallback(() => {
     activeRef.current = false;
-    for (const socketId of [...peersRef.current.keys()]) closePeer(socketId);
+    for (const connId of [...peersRef.current.keys()]) closePeer(connId);
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -256,18 +273,24 @@ export function useVoice(code: string, selfId: string) {
     attachAnalyser(selfIdRef.current, stream);
     startMeter();
 
-    const res = await emitAck<VoiceJoinAck>("voice:join", { code: upper });
-    if (!res.ok) throw new Error(res.error ?? "Could not join voice");
+    const ch = channel();
+    // Announce ourselves; existing peers will offer to us (see onPeerJoined).
+    await ch.presence.enter({ userId: selfIdRef.current });
 
-    for (const peer of res.peers ?? []) {
-      rosterRef.current.set(peer.socketId, peer);
-      // We are the newcomer — existing peers offer to us, so we wait to answer.
-      // If an offer already raced ahead of this ack, backfill the real userId.
-      const early = peersRef.current.get(peer.socketId);
-      if (early && !early.userId) early.userId = peer.userId;
+    const members = await ch.presence.get();
+    const selfConn = myConnId();
+    for (const m of members) {
+      if (m.connectionId === selfConn) continue;
+      const userId = (m.data as { userId?: string } | undefined)?.userId ?? "";
+      rosterRef.current.set(m.connectionId, {
+        socketId: m.connectionId,
+        userId,
+        displayName: "",
+        avatar: "",
+      });
     }
     syncRoster();
-  }, [upper, attachAnalyser, startMeter, syncRoster]);
+  }, [channel, attachAnalyser, startMeter, syncRoster]);
 
   const join = useCallback(async () => {
     if (activeRef.current) return;
@@ -291,9 +314,11 @@ export function useVoice(code: string, selfId: string) {
 
   const leave = useCallback(() => {
     if (!activeRef.current) return;
-    getSocket().emit("voice:leave", { code: upper });
+    channel()
+      .presence.leave()
+      .catch(() => {});
     teardown();
-  }, [upper, teardown]);
+  }, [channel, teardown]);
 
   const toggleMic = useCallback(() => {
     const stream = localStreamRef.current;
@@ -304,41 +329,51 @@ export function useVoice(code: string, selfId: string) {
     if (!next) store.getState().setSpeaking(selfIdRef.current, false);
   }, [store]);
 
-  // --- wire up socket listeners --------------------------------------------
+  // --- wire up Ably presence + signaling -----------------------------------
   useEffect(() => {
     if (!upper) return;
-    const socket = getSocket();
+    const ch = channel();
 
-    const onPeerJoined = (peer: VoicePeer) => {
-      if (!activeRef.current) return;
-      rosterRef.current.set(peer.socketId, peer);
+    const onPeerJoined = (m: Ably.PresenceMessage) => {
+      if (!activeRef.current || m.connectionId === myConnId()) return;
+      const userId = (m.data as { userId?: string } | undefined)?.userId ?? "";
+      rosterRef.current.set(m.connectionId, {
+        socketId: m.connectionId,
+        userId,
+        displayName: "",
+        avatar: "",
+      });
       syncRoster();
       // We were already here — initiate the offer to the newcomer.
-      getOrCreatePeer(peer.socketId, peer.userId, true);
+      getOrCreatePeer(m.connectionId, userId, true);
     };
-    const onPeerLeft = ({ socketId }: { socketId: string }) => closePeer(socketId);
-    const onSignal = (payload: { from: string; data: VoiceSignal }) => {
-      void handleSignal(payload);
+    const onPeerLeft = (m: Ably.PresenceMessage) => closePeer(m.connectionId);
+    const onSignal = (msg: Ably.Message) => {
+      const env = msg.data as VoiceEnvelope;
+      if (!env || env.to !== myConnId()) return;
+      void handleSignal({ from: env.from, data: env.data });
     };
-    // If the socket drops and reconnects it has a new id — rebuild the mesh.
-    const onReconnect = () => {
+    // On a fresh connection (new connectionId) rebuild the mesh.
+    const onConnected = () => {
       if (!activeRef.current) return;
-      for (const socketId of [...peersRef.current.keys()]) closePeer(socketId);
+      for (const connId of [...peersRef.current.keys()]) closePeer(connId);
       doJoin().catch(() => leave());
     };
 
-    socket.on("voice:peer-joined", onPeerJoined);
-    socket.on("voice:peer-left", onPeerLeft);
-    socket.on("voice:signal", onSignal);
-    socket.io.on("reconnect", onReconnect);
+    void ch.presence.subscribe("enter", onPeerJoined);
+    void ch.presence.subscribe("leave", onPeerLeft);
+    void ch.presence.subscribe("absent", onPeerLeft);
+    void ch.subscribe(MSG.voiceSignal, onSignal);
+    getAbly().connection.on("connected", onConnected);
 
     return () => {
-      socket.off("voice:peer-joined", onPeerJoined);
-      socket.off("voice:peer-left", onPeerLeft);
-      socket.off("voice:signal", onSignal);
-      socket.io.off("reconnect", onReconnect);
+      ch.presence.unsubscribe("enter", onPeerJoined);
+      ch.presence.unsubscribe("leave", onPeerLeft);
+      ch.presence.unsubscribe("absent", onPeerLeft);
+      ch.unsubscribe(MSG.voiceSignal, onSignal);
+      getAbly().connection.off("connected", onConnected);
     };
-  }, [upper, syncRoster, getOrCreatePeer, closePeer, handleSignal, doJoin, leave]);
+  }, [upper, channel, syncRoster, getOrCreatePeer, closePeer, handleSignal, doJoin, leave]);
 
   // Tear everything down when the room changes or the component unmounts.
   useEffect(() => teardown, [upper, teardown]);

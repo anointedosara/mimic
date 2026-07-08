@@ -13,7 +13,6 @@
 // which sends a single player ONLY their own information.
 // ============================================================================
 
-import type { Server as IOServer } from "socket.io";
 import { connectToDatabase } from "@/lib/db/mongoose";
 import { Room, type RoomDoc } from "@/lib/db/models/Room";
 import { User } from "@/lib/db/models/User";
@@ -21,22 +20,21 @@ import { assignRoles, resolveRound } from "@/lib/game/engine";
 import { clampImposters, clampPlayers, clampDuration } from "@/lib/game/config";
 import type { RoomSettings } from "@/lib/game/types";
 import type { AckResult, RoomNotice } from "@/lib/game/events";
+import type { Emitter } from "@/lib/game/emitter";
+import type { Scheduler } from "@/lib/game/scheduler";
 import { buildPrivateRole, buildSnapshot } from "./snapshot";
 import { pickWord } from "./words";
 
 const ROLE_PHASE_MS = 5000; // brief personal-role reveal before discussion
 
-type Timer = ReturnType<typeof setTimeout>;
-
 export class GameManager {
-  private io: IOServer;
-  private timers = new Map<string, Timer>();
   private locks = new Map<string, Promise<unknown>>();
   private recentWords = new Map<string, string[]>();
 
-  constructor(io: IOServer) {
-    this.io = io;
-  }
+  constructor(
+    private emitter: Emitter,
+    private scheduler: Scheduler,
+  ) {}
 
   // --- concurrency: serialize mutations per room ---------------------------
   private async withLock<T>(code: string, fn: () => Promise<T>): Promise<T> {
@@ -56,25 +54,18 @@ export class GameManager {
     }
   }
 
-  private roomRoom(code: string) {
-    return `room:${code}`;
-  }
-  private userRoom(code: string, userId: string) {
-    return `user:${code}:${userId}`;
-  }
-
   private async load(code: string): Promise<RoomDoc | null> {
     await connectToDatabase();
     return Room.findOne({ code: code.toUpperCase() });
   }
 
   private notice(code: string, notice: RoomNotice) {
-    this.io.to(this.roomRoom(code)).emit("room:notice", notice);
+    this.emitter.toRoom(code, "room:notice", notice);
   }
 
   // --- broadcasting --------------------------------------------------------
   private broadcast(room: RoomDoc, reveal: Parameters<typeof buildSnapshot>[1] = null) {
-    this.io.to(this.roomRoom(room.code)).emit("room:state", buildSnapshot(room, reveal));
+    this.emitter.toRoom(room.code, "room:state", buildSnapshot(room, reveal));
   }
 
   /** Send each connected player their private role (during role/discussion). */
@@ -82,7 +73,7 @@ export class GameManager {
     for (const p of room.players) {
       const payload = buildPrivateRole(room, p.userId);
       if (payload) {
-        this.io.to(this.userRoom(room.code, p.userId)).emit("game:role", payload);
+        this.emitter.toUser(room.code, p.userId, "game:role", payload);
       }
     }
   }
@@ -92,7 +83,7 @@ export class GameManager {
     const room = await this.load(code);
     if (!room) return;
     const payload = buildPrivateRole(room, userId);
-    if (payload) this.io.to(this.userRoom(code, userId)).emit("game:role", payload);
+    if (payload) this.emitter.toUser(code, userId, "game:role", payload);
   }
 
   // --- player presence -----------------------------------------------------
@@ -177,7 +168,7 @@ export class GameManager {
 
       if (room.players.length === 0) {
         await Room.deleteOne({ code: room.code });
-        this.clearTimer(code);
+        this.scheduler.cancel(code);
         return;
       }
 
@@ -201,7 +192,7 @@ export class GameManager {
       room.players = room.players.filter((p) => p.userId !== targetId);
       await room.save();
 
-      this.io.to(this.userRoom(code, targetId)).emit("room:closed", { reason: "You were removed by the host." });
+      this.emitter.toUser(code, targetId, "room:closed", { reason: "You were removed by the host." });
       this.broadcast(room);
       this.notice(code, { type: "player_kicked", name: target.displayName });
       return { ok: true };
@@ -311,8 +302,23 @@ export class GameManager {
     this.emitRoles(room);
     this.notice(room.code, { type: "game_started" });
 
-    // Auto-advance to the discussion phase (with the synced timer).
-    this.setTimer(room.code, ROLE_PHASE_MS, () => this.enterDiscussion(room.code));
+    // Auto-advance to the discussion phase after the brief role reveal.
+    this.scheduler.armAdvance(room.code, ROLE_PHASE_MS);
+  }
+
+  /**
+   * Idempotent phase-advance entry point, driven by the scheduler callback
+   * (QStash in prod / setTimeout in dev). Re-reads the room and only transitions
+   * if still warranted, so a stale or duplicate callback is a safe no-op.
+   */
+  async advancePhase(code: string) {
+    const room = await this.load(code);
+    if (!room) return;
+    if (room.phase === "role") {
+      await this.enterDiscussion(code);
+    } else if (room.phase === "discussion") {
+      await this.enterVoting(code, "timer");
+    }
   }
 
   private async enterDiscussion(code: string) {
@@ -326,7 +332,7 @@ export class GameManager {
       this.emitRoles(room);
 
       const ms = room.timerEndsAt.getTime() - Date.now();
-      this.setTimer(code, ms, () => this.enterVoting(code, "timer"));
+      this.scheduler.armAdvance(code, ms);
     });
   }
 
@@ -346,7 +352,7 @@ export class GameManager {
     return this.withLock(code, async () => {
       const room = await this.load(code);
       if (!room || room.phase !== "discussion") return;
-      this.clearTimer(code);
+      this.scheduler.cancel(code);
       room.phase = "voting";
       room.timerEndsAt = null;
       await room.save();
@@ -478,7 +484,7 @@ export class GameManager {
       // Rebuild reveal for late/refreshed clients.
       reveal = await this.rebuildReveal(room);
     }
-    this.io.to(this.userRoom(code, userId)).emit("room:state", buildSnapshot(room, reveal));
+    this.emitter.toUser(code, userId, "room:state", buildSnapshot(room, reveal));
     await this.emitRoleTo(code, userId);
   }
 
@@ -506,31 +512,5 @@ export class GameManager {
       category: room.currentCategory ?? "",
       voterCount: voters.length || 1,
     });
-  }
-
-  // --- timers --------------------------------------------------------------
-  private setTimer(code: string, ms: number, fn: () => void) {
-    this.clearTimer(code);
-    const t = setTimeout(fn, Math.max(0, ms));
-    this.timers.set(code, t);
-  }
-  private clearTimer(code: string) {
-    const t = this.timers.get(code);
-    if (t) clearTimeout(t);
-    this.timers.delete(code);
-  }
-
-  /** On server (re)start, re-arm any timers for rooms mid-discussion. */
-  async rehydrateTimers() {
-    await connectToDatabase();
-    const rooms = await Room.find({ phase: "discussion", timerEndsAt: { $ne: null } });
-    for (const room of rooms) {
-      const ms = (room.timerEndsAt?.getTime() ?? 0) - Date.now();
-      if (ms <= 0) {
-        await this.enterVoting(room.code, "timer");
-      } else {
-        this.setTimer(room.code, ms, () => this.enterVoting(room.code, "timer"));
-      }
-    }
   }
 }

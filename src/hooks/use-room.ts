@@ -1,87 +1,109 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { getSocket, emitAck } from "@/lib/socket-client";
+import { useEffect } from "react";
+import { useSession } from "next-auth/react";
+import type * as Ably from "ably";
+import { getAbly } from "@/lib/ably/client";
+import { roomChannel, userChannel } from "@/lib/ably/channels";
+import { postAction, beaconAction } from "@/lib/api/client";
 import { useGameStore } from "@/store/game-store";
 import type { RoomNotice } from "@/lib/game/events";
 import { playSound } from "@/lib/sounds";
 import { toast } from "sonner";
 
 /**
- * Connects to the room over Socket.IO, keeps the Zustand store in sync, and
+ * Connects to the room over Ably, keeps the Zustand store in sync, and
  * transparently re-joins on reconnect so a refresh/disconnect never loses state.
+ * Public room state + notices arrive on the room channel; this player's PRIVATE
+ * role arrives on their own user channel.
  */
 export function useRoom(code: string) {
+  const { data: session } = useSession();
+  const userId = session?.user?.id ?? "";
   const { setSnapshot, setRole, setStatus, setJoinError, reset } = useGameStore();
-  const joinedRef = useRef(false);
 
   useEffect(() => {
-    if (!code) return;
-    const socket = getSocket();
+    if (!code || !userId) return;
     const upper = code.toUpperCase();
+    const ably = getAbly();
+    const room = ably.channels.get(roomChannel(upper));
+    const mine = ably.channels.get(userChannel(upper, userId));
 
     const join = async () => {
-      const res = await emitAck("room:join", { code: upper });
+      const res = await postAction(`/api/room/${upper}/join`);
       if (!res.ok) {
         setJoinError(res.error ?? "Could not join room");
       } else {
         setJoinError(null);
-        joinedRef.current = true;
+        // Ask for a fresh authoritative sync (also delivers our private role).
+        await postAction(`/api/room/${upper}/sync`);
       }
     };
 
-    const onConnect = () => {
+    const enterAndJoin = async () => {
+      try {
+        await room.presence.enter();
+      } catch {
+        /* presence best-effort */
+      }
+      await join();
+    };
+
+    // --- connection state -> UI status --------------------------------------
+    const onConnected = () => {
       setStatus("connected");
-      // (Re)join and request a fresh authoritative sync.
-      join().then(() => socket.emit("room:requestSync", { code: upper }));
+      void enterAndJoin();
     };
-    const onDisconnect = () => setStatus("reconnecting");
-    const onReconnectAttempt = () => setStatus("reconnecting");
-    const onConnectError = (err: Error) => {
-      // Surface handshake failures (e.g. auth rejected) instead of hanging
-      // silently on "connecting" forever.
+    const onDisconnected = () => setStatus("reconnecting");
+    const onFailed = () => {
       setStatus("disconnected");
-      if (/unauthor/i.test(err.message)) {
-        setJoinError("Your session expired — please sign in again.");
-      }
+      setJoinError("Realtime connection failed — please refresh.");
     };
 
-    const onState = (snapshot: Parameters<typeof setSnapshot>[0]) => setSnapshot(snapshot);
-    const onRole = (role: Parameters<typeof setRole>[0]) => setRole(role);
-    const onClosed = (payload: { reason: string }) => {
-      toast.error(payload.reason || "The room was closed");
+    // --- channel messages ---------------------------------------------------
+    const onState = (msg: Ably.Message) => setSnapshot(msg.data);
+    const onRole = (msg: Ably.Message) => setRole(msg.data);
+    const onNotice = (msg: Ably.Message) => handleNotice(msg.data as RoomNotice);
+    const onClosed = (msg: Ably.Message) => {
+      toast.error((msg.data?.reason as string) || "The room was closed");
       reset();
       if (typeof window !== "undefined") window.location.href = "/";
     };
-    const onNotice = (n: RoomNotice) => handleNotice(n);
-    const onError = (p: { message: string }) => toast.error(p.message);
 
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on("connect_error", onConnectError);
-    socket.io.on("reconnect_attempt", onReconnectAttempt);
-    socket.on("room:state", onState);
-    socket.on("game:role", onRole);
-    socket.on("room:closed", onClosed);
-    socket.on("room:notice", onNotice);
-    socket.on("error", onError);
+    room.subscribe("room:state", onState);
+    room.subscribe("room:notice", onNotice);
+    mine.subscribe("room:state", onState);
+    mine.subscribe("game:role", onRole);
+    mine.subscribe("room:closed", onClosed);
 
-    if (socket.connected) onConnect();
-    else setStatus("connecting");
+    ably.connection.on("connected", onConnected);
+    ably.connection.on("disconnected", onDisconnected);
+    ably.connection.on("failed", onFailed);
+
+    if (ably.connection.state === "connected") {
+      setStatus("connected");
+      void enterAndJoin();
+    } else {
+      setStatus("connecting");
+    }
+
+    // Best-effort leave on tab close (hard drops are covered by presence).
+    const onUnload = () => beaconAction(`/api/room/${upper}/leave`);
+    window.addEventListener("pagehide", onUnload);
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
-      socket.off("connect_error", onConnectError);
-      socket.io.off("reconnect_attempt", onReconnectAttempt);
-      socket.off("room:state", onState);
-      socket.off("game:role", onRole);
-      socket.off("room:closed", onClosed);
-      socket.off("room:notice", onNotice);
-      socket.off("error", onError);
+      window.removeEventListener("pagehide", onUnload);
+      room.unsubscribe("room:state", onState);
+      room.unsubscribe("room:notice", onNotice);
+      mine.unsubscribe("room:state", onState);
+      mine.unsubscribe("game:role", onRole);
+      mine.unsubscribe("room:closed", onClosed);
+      ably.connection.off("connected", onConnected);
+      ably.connection.off("disconnected", onDisconnected);
+      ably.connection.off("failed", onFailed);
+      room.presence.leave().catch(() => {});
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code]);
+  }, [code, userId, setSnapshot, setRole, setStatus, setJoinError, reset]);
 }
 
 function handleNotice(n: RoomNotice) {
@@ -124,12 +146,14 @@ function handleNotice(n: RoomNotice) {
 // --- room action helpers ----------------------------------------------------
 export const roomActions = {
   updateSettings: (code: string, settings: Record<string, number>) =>
-    emitAck("room:updateSettings", { code, settings }),
-  kick: (code: string, userId: string) => emitAck("room:kick", { code, userId }),
-  start: (code: string) => emitAck("game:start", { code }),
-  voteEarly: (code: string) => emitAck("game:voteEarly", { code }),
-  castVote: (code: string, targetId: string) => emitAck("game:castVote", { code, targetId }),
-  reveal: (code: string) => emitAck("game:reveal", { code }),
-  playAgain: (code: string) => emitAck("game:playAgain", { code }),
-  leave: (code: string) => getSocket().emit("room:leave", { code }),
+    postAction(`/api/room/${code.toUpperCase()}/settings`, { settings }),
+  kick: (code: string, userId: string) =>
+    postAction(`/api/room/${code.toUpperCase()}/kick`, { userId }),
+  start: (code: string) => postAction(`/api/game/${code.toUpperCase()}/start`),
+  voteEarly: (code: string) => postAction(`/api/game/${code.toUpperCase()}/voteEarly`),
+  castVote: (code: string, targetId: string) =>
+    postAction(`/api/game/${code.toUpperCase()}/castVote`, { targetId }),
+  reveal: (code: string) => postAction(`/api/game/${code.toUpperCase()}/reveal`),
+  playAgain: (code: string) => postAction(`/api/game/${code.toUpperCase()}/playAgain`),
+  leave: (code: string) => postAction(`/api/room/${code.toUpperCase()}/leave`),
 };

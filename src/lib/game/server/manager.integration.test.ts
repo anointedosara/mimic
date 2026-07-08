@@ -13,25 +13,25 @@ import { User } from "@/lib/db/models/User";
 import { Word } from "@/lib/db/models/Word";
 import type { PrivateRole, RoomSnapshot } from "@/lib/game/types";
 
-// --- Mock Socket.IO server that records emissions per target room ----------
+// --- Mock Emitter + Scheduler that record emissions per target channel ------
 interface Emission {
   target: string;
   event: string;
   payload: unknown;
 }
-function createMockIo() {
+function createMockDeps() {
   const emissions: Emission[] = [];
-  const io = {
-    to(target: string) {
-      return {
-        emit(event: string, payload: unknown) {
-          emissions.push({ target, event, payload });
-        },
-      };
+  const emitter = {
+    toRoom(code: string, event: string, payload: unknown) {
+      emissions.push({ target: `room:${code.toUpperCase()}`, event, payload });
     },
-    sockets: { adapter: { rooms: new Map() } },
+    toUser(code: string, userId: string, event: string, payload: unknown) {
+      emissions.push({ target: `user:${code.toUpperCase()}:${userId}`, event, payload });
+    },
   };
-  return { io: io as never, emissions };
+  // Timers are irrelevant to this test; record nothing.
+  const scheduler = { armAdvance() {}, cancel() {} };
+  return { emitter, scheduler, emissions };
 }
 
 let mongod: MongoMemoryServer;
@@ -52,8 +52,8 @@ afterAll(async () => {
 
 describe("GameManager full round", () => {
   it("runs lobby → roles → voting → reveal without ever leaking roles", async () => {
-    const { io, emissions } = createMockIo();
-    const manager = new GameManager(io);
+    const { emitter, scheduler, emissions } = createMockDeps();
+    const manager = new GameManager(emitter, scheduler);
 
     // Seed 4 users + a room hosted by u1.
     const users = await User.create([

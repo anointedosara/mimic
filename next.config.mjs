@@ -2,7 +2,6 @@
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  // We run a custom Socket.IO server (server/index.ts), so images stay unoptimized-friendly.
   images: {
     remotePatterns: [{ protocol: "https", hostname: "**" }],
   },
