@@ -6,15 +6,25 @@ import type { RoomDoc } from "@/lib/db/models/Room";
 import type { PrivateRole, PublicPlayer, PublicVote, RoomSnapshot } from "@/lib/game/types";
 
 export function buildPublicPlayers(room: RoomDoc): PublicPlayer[] {
-  return room.players.map((p) => ({
-    userId: p.userId,
-    displayName: p.displayName,
-    avatar: p.avatar,
-    isHost: p.isHost,
-    connected: p.connected,
-    hasVoted: p.hasVoted,
-    roundsWon: p.roundsWon,
-  }));
+  // Dedupe by userId as a final safety net: a duplicate entry (e.g. from a
+  // concurrent join race) must never reach the client, or React sees two
+  // children with the same key and drops/duplicates tiles.
+  const seen = new Set<string>();
+  const players: PublicPlayer[] = [];
+  for (const p of room.players) {
+    if (seen.has(p.userId)) continue;
+    seen.add(p.userId);
+    players.push({
+      userId: p.userId,
+      displayName: p.displayName,
+      avatar: p.avatar,
+      isHost: p.isHost,
+      connected: p.connected,
+      hasVoted: p.hasVoted,
+      roundsWon: p.roundsWon,
+    });
+  }
+  return players;
 }
 
 export function buildPublicVotes(room: RoomDoc): PublicVote[] {

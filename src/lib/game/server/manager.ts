@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { connectToDatabase } from "@/lib/db/mongoose";
-import { Room, type RoomDoc } from "@/lib/db/models/Room";
+import { Room, type RoomDoc, type RoomPlayer } from "@/lib/db/models/Room";
 import { User } from "@/lib/db/models/User";
 import { assignRoles, resolveRound } from "@/lib/game/engine";
 import { clampImposters, clampPlayers, clampDuration } from "@/lib/game/config";
@@ -117,57 +117,95 @@ export class GameManager {
     return successor.displayName;
   }
 
+  /** A fully-formed player subdocument (all fields — raw $push skips defaults). */
+  private newPlayerDoc(
+    user: { id: string; displayName: string; avatar: string },
+  ): RoomPlayer {
+    return {
+      userId: user.id,
+      displayName: user.displayName,
+      avatar: user.avatar,
+      isHost: false, // ensureConnectedHost promotes if the room has no host
+      connected: true,
+      disconnectedAt: null,
+      joinedAt: new Date(),
+      roundsWon: 0,
+      role: null,
+      word: null,
+      hint: null,
+      hasVoted: false,
+      votedFor: null,
+    } as RoomPlayer;
+  }
+
+  /** Collapse any duplicate userIds (keep the first). Returns true if it changed. */
+  private dedupePlayers(room: RoomDoc): boolean {
+    const seen = new Set<string>();
+    const before = room.players.length;
+    room.players = room.players.filter((p) => {
+      if (seen.has(p.userId)) return false;
+      seen.add(p.userId);
+      return true;
+    }) as typeof room.players;
+    return room.players.length !== before;
+  }
+
   async handleJoin(code: string, user: { id: string; displayName: string; avatar: string }): Promise<AckResult> {
-    return this.withLock(code, async () => {
-      const room = await this.load(code);
+    const CODE = code.toUpperCase();
+
+    // Race-safe add. On serverless, each request is a fresh instance so the
+    // in-memory lock can't serialize concurrent joins (two tabs / a fast
+    // reconnect). We let MongoDB be the arbiter: push this player ONLY if the
+    // userId isn't already present AND there's capacity — a single atomic op, so
+    // two simultaneous joins can never both insert. This is what makes duplicate
+    // player entries impossible rather than merely rare.
+    let added = false;
+    try {
+      const res = await Room.updateOne(
+        {
+          code: CODE,
+          phase: "lobby",
+          "players.userId": { $ne: user.id },
+          $expr: { $lt: [{ $size: "$players" }, "$settings.maxPlayers"] },
+        },
+        { $push: { players: this.newPlayerDoc(user) } },
+      );
+      added = res.modifiedCount === 1;
+    } catch (err) {
+      console.error("[join] atomic add failed", err);
+    }
+
+    return this.withLock(CODE, async () => {
+      const room = await this.load(CODE);
       if (!room) return { ok: false, error: "Room not found" };
 
-      let player = room.players.find((p) => p.userId === user.id);
-      const isNew = !player;
+      // Belt-and-suspenders: heal any duplicates left behind by older data.
+      if (this.dedupePlayers(room)) await room.save();
 
+      const player = room.players.find((p) => p.userId === user.id);
       if (!player) {
-        if (room.phase !== "lobby") {
-          return { ok: false, error: "Game already in progress" };
-        }
-        if (room.players.length >= room.settings.maxPlayers) {
-          return { ok: false, error: "Room is full" };
-        }
-        room.players.push({
-          userId: user.id,
-          displayName: user.displayName,
-          avatar: user.avatar,
-          isHost: room.players.length === 0,
-          connected: true,
-          disconnectedAt: null,
-          joinedAt: new Date(),
-          roundsWon: 0,
-          role: null,
-          word: null,
-          hint: null,
-          hasVoted: false,
-          votedFor: null,
-        });
-        player = room.players[room.players.length - 1];
-      } else {
-        // Reconnect: keep their role/vote (and host!) intact, clear the drop
-        // timer, and refresh identity + presence.
-        player.connected = true;
-        player.disconnectedAt = null;
-        player.displayName = user.displayName;
-        player.avatar = user.avatar;
+        // We didn't add them — report the precise reason.
+        if (room.phase !== "lobby") return { ok: false, error: "Game already in progress" };
+        return { ok: false, error: "Room is full" };
       }
+
+      // Refresh identity + presence, clear the drop timer (keeps host on refresh).
+      player.connected = true;
+      player.disconnectedAt = null;
+      player.displayName = user.displayName;
+      player.avatar = user.avatar;
 
       // Ensure a usable host exists (promotes only if the host is truly gone).
       const newHost = this.ensureConnectedHost(room);
 
       await room.save();
       this.broadcast(room);
-      if (isNew) this.notice(code, { type: "player_joined", name: user.displayName });
-      if (newHost) this.notice(code, { type: "host_changed", name: newHost });
+      if (added) this.notice(CODE, { type: "player_joined", name: user.displayName });
+      if (newHost) this.notice(CODE, { type: "host_changed", name: newHost });
 
       // Re-send private role if a round is underway.
       if (["role", "discussion", "voting"].includes(room.phase)) {
-        await this.emitRoleTo(code, user.id);
+        await this.emitRoleTo(CODE, user.id);
       }
       return { ok: true };
     });
