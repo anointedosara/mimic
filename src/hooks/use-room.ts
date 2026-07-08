@@ -55,9 +55,19 @@ export function useRoom(code: string) {
       void enterAndJoin();
     };
     const onDisconnected = () => setStatus("reconnecting");
+    // Ably's "failed" is terminal (usually a transient auth hiccup, e.g. the
+    // server restarting mid-session). Don't strand the user on "Offline" —
+    // show reconnecting and kick off a fresh connection (re-mints a token).
+    let retry: ReturnType<typeof setTimeout> | undefined;
     const onFailed = () => {
-      setStatus("disconnected");
-      setJoinError("Realtime connection failed — please refresh.");
+      setStatus("reconnecting");
+      retry = setTimeout(() => {
+        try {
+          ably.connect();
+        } catch {
+          /* ignore */
+        }
+      }, 1500);
     };
 
     // --- channel messages ---------------------------------------------------
@@ -92,6 +102,7 @@ export function useRoom(code: string) {
     window.addEventListener("pagehide", onUnload);
 
     return () => {
+      if (retry) clearTimeout(retry);
       window.removeEventListener("pagehide", onUnload);
       room.unsubscribe("room:state", onState);
       room.unsubscribe("room:notice", onNotice);
