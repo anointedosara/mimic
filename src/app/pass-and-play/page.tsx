@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import { PartyPopper } from "lucide-react";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui/button";
 import { Setup } from "@/components/passplay/setup";
@@ -31,12 +32,11 @@ export default function PassAndPlayPage() {
     <div className="min-h-dvh">
       <SiteHeader />
       <main className="container py-8 sm:py-10">
-        <AnimatePresence mode="wait">
+        <ErrorBoundary resetKey={phase}>
           <motion.div
             key={phase}
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
             transition={{ duration: 0.25 }}
           >
             {phase === "setup" && (
@@ -82,7 +82,7 @@ export default function PassAndPlayPage() {
             {phase === "voting" && <Voting />}
             {phase === "result" && <Result />}
           </motion.div>
-        </AnimatePresence>
+        </ErrorBoundary>
       </main>
     </div>
   );

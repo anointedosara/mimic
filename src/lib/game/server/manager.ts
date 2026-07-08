@@ -26,6 +26,10 @@ import { buildPrivateRole, buildSnapshot } from "./snapshot";
 import { pickWord } from "./words";
 
 const ROLE_PHASE_MS = 5000; // brief personal-role reveal before discussion
+// A host who drops (refresh, backgrounded tab, flaky network) keeps the crown
+// for this long. Only if they're still gone after it does the crown move to a
+// connected player — so a refresh never costs you host.
+const HOST_GRACE_MS = 45_000;
 
 export class GameManager {
   private locks = new Map<string, Promise<unknown>>();
@@ -87,6 +91,32 @@ export class GameManager {
   }
 
   // --- player presence -----------------------------------------------------
+  /**
+   * Guarantee the room has a *usable* host. Keeps the current host if they're
+   * connected, or disconnected but still inside the grace window (so a refresh
+   * doesn't hand off the crown). Otherwise promotes the first connected player.
+   * Returns the new host's name if it changed, else null (so the caller can
+   * announce it). Mutates `room` but does not save/broadcast.
+   */
+  private ensureConnectedHost(room: RoomDoc): string | null {
+    const host = room.players.find((p) => p.isHost);
+    const withinGrace =
+      host?.connected ||
+      (host?.disconnectedAt != null &&
+        Date.now() - new Date(host.disconnectedAt).getTime() < HOST_GRACE_MS);
+    if (host && withinGrace) return null;
+
+    const successor = room.players.find((p) => p.connected);
+    if (!successor) return null; // nobody to hand off to — leave host as-is
+    if (successor.isHost) {
+      room.hostId = successor.userId;
+      return null;
+    }
+    for (const p of room.players) p.isHost = p.userId === successor.userId;
+    room.hostId = successor.userId;
+    return successor.displayName;
+  }
+
   async handleJoin(code: string, user: { id: string; displayName: string; avatar: string }): Promise<AckResult> {
     return this.withLock(code, async () => {
       const room = await this.load(code);
@@ -108,6 +138,7 @@ export class GameManager {
           avatar: user.avatar,
           isHost: room.players.length === 0,
           connected: true,
+          disconnectedAt: null,
           joinedAt: new Date(),
           roundsWon: 0,
           role: null,
@@ -118,21 +149,21 @@ export class GameManager {
         });
         player = room.players[room.players.length - 1];
       } else {
-        // Reconnect: keep their role/vote intact, refresh identity + presence.
+        // Reconnect: keep their role/vote (and host!) intact, clear the drop
+        // timer, and refresh identity + presence.
         player.connected = true;
+        player.disconnectedAt = null;
         player.displayName = user.displayName;
         player.avatar = user.avatar;
       }
 
-      // Ensure there is always a host.
-      if (!room.players.some((p) => p.isHost)) {
-        room.players[0].isHost = true;
-        room.hostId = room.players[0].userId;
-      }
+      // Ensure a usable host exists (promotes only if the host is truly gone).
+      const newHost = this.ensureConnectedHost(room);
 
       await room.save();
       this.broadcast(room);
       if (isNew) this.notice(code, { type: "player_joined", name: user.displayName });
+      if (newHost) this.notice(code, { type: "host_changed", name: newHost });
 
       // Re-send private role if a round is underway.
       if (["role", "discussion", "voting"].includes(room.phase)) {
@@ -142,29 +173,46 @@ export class GameManager {
     });
   }
 
+  /**
+   * TRANSIENT drop — refresh, backgrounded tab, or flaky network. The player
+   * STAYS in the room (marked disconnected) and KEEPS host; we only stamp when
+   * they dropped so the crown can move later if they never come back. Nothing
+   * is removed here, so a bad connection never ejects anyone.
+   */
   async handleDisconnect(code: string, userId: string) {
     return this.withLock(code, async () => {
       const room = await this.load(code);
       if (!room) return;
       const player = room.players.find((p) => p.userId === userId);
-      if (!player) return;
+      if (!player || !player.connected) return;
+
       player.connected = false;
+      player.disconnectedAt = new Date();
 
-      // In the lobby, remove disconnected players entirely.
-      if (room.phase === "lobby") {
-        room.players = room.players.filter((p) => p.userId !== userId);
-      }
+      await room.save();
+      this.broadcast(room);
+    });
+  }
 
-      // Host migration: if the host left, promote the first connected player.
-      if (player.isHost) {
-        player.isHost = false;
-        const successor = room.players.find((p) => p.connected) ?? room.players[0];
-        if (successor) {
-          successor.isHost = true;
-          room.hostId = successor.userId;
-          this.notice(code, { type: "host_changed", name: successor.displayName });
-        }
-      }
+  /**
+   * EXPLICIT leave — the player tapped "Leave". Remove them, hand off the host
+   * crown if needed, and delete the room once it's empty.
+   */
+  async handleLeave(code: string, userId: string) {
+    return this.withLock(code, async () => {
+      const room = await this.load(code);
+      if (!room) return;
+      const player = room.players.find((p) => p.userId === userId);
+      if (!player) return;
+
+      // Eject EVERY device this account has open on the room — a leave is for
+      // the user, not just the tab they clicked it in. All their devices are
+      // subscribed to their user channel, so this reaches every one of them and
+      // stops any from silently re-joining.
+      this.emitter.toUser(code, userId, "room:closed", { reason: "You left the room." });
+
+      const wasHost = player.isHost;
+      room.players = room.players.filter((p) => p.userId !== userId);
 
       if (room.players.length === 0) {
         await Room.deleteOne({ code: room.code });
@@ -172,9 +220,22 @@ export class GameManager {
         return;
       }
 
+      let newHost: string | null = null;
+      if (wasHost) {
+        newHost = this.ensureConnectedHost(room);
+        // Nobody connected to take over — hand to the first remaining player so
+        // the room always has a host.
+        if (!room.players.some((p) => p.isHost) && room.players[0]) {
+          room.players[0].isHost = true;
+          room.hostId = room.players[0].userId;
+          newHost = room.players[0].displayName;
+        }
+      }
+
       await room.save();
       this.broadcast(room);
       this.notice(code, { type: "player_left", name: player.displayName });
+      if (wasHost && newHost) this.notice(code, { type: "host_changed", name: newHost });
     });
   }
 
@@ -505,6 +566,17 @@ export class GameManager {
   async syncTo(code: string, userId: string) {
     const room = await this.load(code);
     if (!room) return;
+
+    // Heal a host who's been gone past the grace window — the periodic re-sync
+    // from any connected client is enough to move the crown, so the game never
+    // gets stuck waiting on a host who isn't coming back.
+    const newHost = this.ensureConnectedHost(room);
+    if (newHost) {
+      await room.save();
+      this.broadcast(room);
+      this.notice(code, { type: "host_changed", name: newHost });
+    }
+
     // Re-emit the current snapshot to just this user (post-refresh hydration).
     let reveal = null;
     if (room.phase === "reveal") {

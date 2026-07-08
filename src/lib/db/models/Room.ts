@@ -12,6 +12,8 @@ export interface RoomPlayer {
   avatar: string;
   isHost: boolean;
   connected: boolean;
+  /** When they last dropped (transient disconnect). Drives grace-based host handoff. */
+  disconnectedAt: Date | null;
   joinedAt: Date;
   roundsWon: number;
 
@@ -50,6 +52,7 @@ const RoomPlayerSchema = new Schema<RoomPlayer>(
     avatar: { type: String, required: true },
     isHost: { type: Boolean, default: false },
     connected: { type: Boolean, default: true },
+    disconnectedAt: { type: Date, default: null },
     joinedAt: { type: Date, default: () => new Date() },
     roundsWon: { type: Number, default: 0 },
     role: { type: String, enum: ["player", "imposter", null], default: null },

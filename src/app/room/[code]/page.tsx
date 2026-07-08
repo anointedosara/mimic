@@ -3,8 +3,9 @@
 import { useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import { Loader2, AlertTriangle } from "lucide-react";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { useRoom, roomActions } from "@/hooks/use-room";
 import { useGameStore } from "@/store/game-store";
 import { RoomBar } from "@/components/game/room-bar";
@@ -90,12 +91,17 @@ export default function RoomPage() {
           {!snapshot ? (
             <LoadingState />
           ) : (
-            <AnimatePresence mode="wait">
+            // No AnimatePresence "mode=wait" here: it can strand the incoming
+            // phase if the outgoing exit animation never completes, leaving the
+            // body blank until a manual refresh. A keyed motion.div re-mounts
+            // (and re-animates) on every phase change and always renders. The
+            // ErrorBoundary guards against a throwing phase blanking the screen
+            // and auto-recovers when the next snapshot arrives.
+            <ErrorBoundary resetKey={snapshot}>
               <motion.div
                 key={snapshot.phase}
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -12 }}
                 transition={{ duration: 0.25 }}
               >
                 {snapshot.phase === "lobby" && <Lobby snapshot={snapshot} selfId={selfId} />}
@@ -111,7 +117,7 @@ export default function RoomPage() {
                   </div>
                 )}
               </motion.div>
-            </AnimatePresence>
+            </ErrorBoundary>
           )}
         </div>
       </div>

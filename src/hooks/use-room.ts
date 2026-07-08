@@ -98,12 +98,22 @@ export function useRoom(code: string) {
       setStatus("connecting");
     }
 
-    // Best-effort leave on tab close (hard drops are covered by presence).
-    const onUnload = () => beaconAction(`/api/room/${upper}/leave`);
+    // On tab hide/close, mark a TRANSIENT disconnect — NOT a leave. A refresh,
+    // a backgrounded mobile tab, or a dropped network keeps you in the room
+    // (and keeps the host their crown); only the explicit "Leave" button exits.
+    const onUnload = () => beaconAction(`/api/room/${upper}/disconnect`);
     window.addEventListener("pagehide", onUnload);
+
+    // Silent self-heal: re-request the authoritative snapshot every ~75s. This
+    // keeps everyone in sync and recovers any stuck UI without a page reload or
+    // dropping voice — nothing visibly changes when state is already current.
+    const resync = setInterval(() => {
+      if (ably.connection.state === "connected") void postAction(`/api/room/${upper}/sync`);
+    }, 75_000);
 
     return () => {
       if (retry) clearTimeout(retry);
+      clearInterval(resync);
       window.removeEventListener("pagehide", onUnload);
       room.unsubscribe("room:state", onState);
       room.unsubscribe("room:notice", onNotice);
