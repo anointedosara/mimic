@@ -21,6 +21,7 @@ export function useRoom(code: string) {
   const { data: session } = useSession();
   const userId = session?.user?.id ?? "";
   const { setSnapshot, setRole, setStatus, setJoinError, reset } = useGameStore();
+  const snapshot = useGameStore((s) => s.snapshot);
 
   useEffect(() => {
     if (!code || !userId) return;
@@ -115,6 +116,47 @@ export function useRoom(code: string) {
       room.presence.leave().catch(() => {});
     };
   }, [code, userId, setSnapshot, setRole, setStatus, setJoinError, reset]);
+
+  // --- host autopilot -------------------------------------------------------
+  // Timed phase transitions (role -> discussion, discussion -> voting) are
+  // normally driven by a scheduled QStash callback. When that callback can't be
+  // delivered (QStash can't reach the app URL, e.g. a localhost/self-hosted
+  // deploy, or a frozen serverless function), the game would hang. As a
+  // fallback the HOST's browser nudges the room forward once a transition is
+  // due. handleClientAdvance is idempotent, host/deadline-guarded, and locked,
+  // so this is a harmless no-op whenever the scheduler already did its job.
+  const phase = snapshot?.phase;
+  const timerEndsAt = snapshot?.timerEndsAt ?? null;
+  const hostId = snapshot?.hostId;
+  useEffect(() => {
+    if (!code || !userId || hostId !== userId) return;
+    const upper = code.toUpperCase();
+    const fire = () => void postAction(`/api/game/${upper}/advance-now`);
+
+    let interval: ReturnType<typeof setInterval> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const arm = (delayMs: number) => {
+      timeout = setTimeout(() => {
+        fire();
+        // Keep retrying (idempotent) until the phase changes and this effect
+        // is torn down — covers a dropped request or a transient failure.
+        interval = setInterval(fire, 4000);
+      }, Math.max(0, delayMs));
+    };
+
+    if (phase === "role") {
+      // Let the brief role reveal (and the scheduler) have first crack.
+      arm(5500);
+    } else if (phase === "discussion" && timerEndsAt) {
+      // Only after the discussion timer has actually elapsed.
+      arm(timerEndsAt - Date.now() + 750);
+    }
+
+    return () => {
+      if (timeout) clearTimeout(timeout);
+      if (interval) clearInterval(interval);
+    };
+  }, [code, userId, phase, timerEndsAt, hostId]);
 }
 
 function handleNotice(n: RoomNotice) {
@@ -165,6 +207,7 @@ export const roomActions = {
   castVote: (code: string, targetId: string) =>
     postAction(`/api/game/${code.toUpperCase()}/castVote`, { targetId }),
   reveal: (code: string) => postAction(`/api/game/${code.toUpperCase()}/reveal`),
+  advanceNow: (code: string) => postAction(`/api/game/${code.toUpperCase()}/advance-now`),
   playAgain: (code: string) => postAction(`/api/game/${code.toUpperCase()}/playAgain`),
   leave: (code: string) => postAction(`/api/room/${code.toUpperCase()}/leave`),
 };

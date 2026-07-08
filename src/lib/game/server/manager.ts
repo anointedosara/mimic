@@ -321,6 +321,33 @@ export class GameManager {
     }
   }
 
+  /**
+   * Client-driven phase advance — a fallback for when the scheduled callback
+   * (QStash) can't be delivered (e.g. a public URL that QStash can't reach, or
+   * a frozen serverless function). A connected participant may nudge the room
+   * forward, but only when it's genuinely due:
+   *  - role: any time after the brief reveal (the client waits out ROLE_PHASE_MS)
+   *  - discussion: only once the timer deadline has passed (so it can't cut the
+   *    discussion short — that's what "vote early" is for)
+   * enterDiscussion/enterVoting are themselves lock- and phase-guarded, so
+   * duplicate or racing calls are safe no-ops.
+   */
+  async handleClientAdvance(code: string, userId: string): Promise<AckResult> {
+    const room = await this.load(code);
+    if (!room) return { ok: false, error: "Room not found" };
+    if (!room.players.some((p) => p.userId === userId && p.connected)) {
+      return { ok: false, error: "You are not in this round" };
+    }
+
+    if (room.phase === "role") {
+      await this.enterDiscussion(code);
+    } else if (room.phase === "discussion") {
+      const due = !room.timerEndsAt || Date.now() >= new Date(room.timerEndsAt).getTime();
+      if (due) await this.enterVoting(code, "timer");
+    }
+    return { ok: true };
+  }
+
   private async enterDiscussion(code: string) {
     return this.withLock(code, async () => {
       const room = await this.load(code);
