@@ -37,6 +37,14 @@ export function useRoom(code: string) {
     };
     const onDisconnect = () => setStatus("reconnecting");
     const onReconnectAttempt = () => setStatus("reconnecting");
+    const onConnectError = (err: Error) => {
+      // Surface handshake failures (e.g. auth rejected) instead of hanging
+      // silently on "connecting" forever.
+      setStatus("disconnected");
+      if (/unauthor/i.test(err.message)) {
+        setJoinError("Your session expired — please sign in again.");
+      }
+    };
 
     const onState = (snapshot: Parameters<typeof setSnapshot>[0]) => setSnapshot(snapshot);
     const onRole = (role: Parameters<typeof setRole>[0]) => setRole(role);
@@ -50,6 +58,7 @@ export function useRoom(code: string) {
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
+    socket.on("connect_error", onConnectError);
     socket.io.on("reconnect_attempt", onReconnectAttempt);
     socket.on("room:state", onState);
     socket.on("game:role", onRole);
@@ -63,6 +72,7 @@ export function useRoom(code: string) {
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
       socket.off("room:state", onState);
       socket.off("game:role", onRole);

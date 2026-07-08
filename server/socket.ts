@@ -21,6 +21,19 @@ interface SocketData {
 /** Socket.IO room name for a room's voice mesh. */
 const voiceRoom = (code: string) => `voice:${code}`;
 
+/** Parse a raw `Cookie:` header into a name→value map. */
+function parseCookieHeader(header: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const name = part.slice(0, idx).trim();
+    if (!name) continue;
+    out[name] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
 export function initSocketServer(httpServer: HTTPServer): IOServer {
   const io = new IOServer(httpServer, {
     path: SOCKET_PATH,
@@ -36,8 +49,13 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
     try {
       const cookie = socket.handshake.headers.cookie ?? "";
       const token = await getToken({
-        // getToken only reads headers.cookie from the request.
-        req: { headers: { cookie } } as unknown as Parameters<typeof getToken>[0]["req"],
+        // next-auth's SessionStore reads `req.cookies` (a parsed name→value
+        // map), NOT `req.headers.cookie`. Passing only the raw header makes
+        // getToken find nothing and reject every socket as Unauthorized.
+        req: {
+          cookies: parseCookieHeader(cookie),
+          headers: { cookie },
+        } as unknown as Parameters<typeof getToken>[0]["req"],
         secret: process.env.NEXTAUTH_SECRET,
       });
       if (!token?.uid) return next(new Error("Unauthorized"));
