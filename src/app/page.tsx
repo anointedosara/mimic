@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { motion } from "framer-motion";
-import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye, Smartphone, Wifi } from "lucide-react";
+import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye, Smartphone, Wifi, Bot } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
@@ -83,6 +83,17 @@ export default function HomePage() {
           >
             <Smartphone className="h-5 w-5" /> Pass &amp; Play
           </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full sm:w-auto"
+            onClick={() => {
+              playSound("click");
+              router.push("/solo");
+            }}
+          >
+            <Bot className="h-5 w-5" /> Solo vs AI
+          </Button>
         </motion.div>
 
         <motion.div
@@ -118,12 +129,12 @@ export default function HomePage() {
       {/* Game modes */}
       <section className="container mt-24">
         <div className="text-center">
-          <h2 className="font-display text-3xl font-black sm:text-4xl">Two ways to play</h2>
+          <h2 className="font-display text-3xl font-black sm:text-4xl">Three ways to play</h2>
           <p className="mx-auto mt-2 max-w-md text-muted-foreground">
-            Everyone in the same room, or scattered across the world.
+            Online with friends, passed around one phone, or solo against AI.
           </p>
         </div>
-        <div className="mt-8 grid gap-4 sm:grid-cols-2">
+        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
@@ -176,6 +187,35 @@ export default function HomePage() {
               </Button>
             </div>
           </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ delay: 0.16 }}
+            className="glass card-hover flex flex-col rounded-2xl p-6"
+          >
+            <div className="mb-3 grid h-12 w-12 place-items-center rounded-xl bg-mimic-amber/15 text-mimic-amber">
+              <Bot className="h-6 w-6" />
+            </div>
+            <h3 className="font-display text-xl font-bold">Solo vs AI</h3>
+            <p className="mt-1 flex-1 text-sm text-muted-foreground">
+              No friends around? Fill the table with AI players — each with their own personality,
+              clues and voting style. Pick a difficulty and see if you can blend in.
+            </p>
+            <div className="mt-4">
+              <Button
+                variant="gradient"
+                className="w-full"
+                onClick={() => {
+                  playSound("click");
+                  router.push("/solo");
+                }}
+              >
+                <Play className="h-4 w-4" /> Play against AI
+              </Button>
+            </div>
+          </motion.div>
         </div>
       </section>
 
@@ -215,10 +255,22 @@ export default function HomePage() {
 
       <footer className="border-t border-white/5 py-8 text-center text-sm text-muted-foreground">
         <p>
-          MIMIC · Built with Next.js, Socket.IO & MongoDB ·{" "}
-          <Link href="/login" className="text-primary hover:underline">
-            Sign in
-          </Link>
+          MIMIC · Built with Next.js, Socket.IO &amp; MongoDB
+          {status === "authenticated" ? (
+            <>
+              {" · "}
+              <Link href="/profile" className="text-primary hover:underline">
+                Your profile
+              </Link>
+            </>
+          ) : status === "unauthenticated" ? (
+            <>
+              {" · "}
+              <Link href="/login" className="text-primary hover:underline">
+                Sign in
+              </Link>
+            </>
+          ) : null}
         </p>
       </footer>
     </div>

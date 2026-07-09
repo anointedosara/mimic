@@ -69,7 +69,12 @@ export class GameManager {
 
   // --- broadcasting --------------------------------------------------------
   private broadcast(room: RoomDoc, reveal: Parameters<typeof buildSnapshot>[1] = null) {
-    this.emitter.toRoom(room.code, "room:state", buildSnapshot(room, reveal));
+    // During the reveal phase the snapshot MUST carry the results, or the client
+    // sits on its loading spinner forever. Any plain broadcast (a join, a
+    // disconnect, a host handoff) would otherwise send reveal:null and wipe the
+    // results for everyone — so we always rebuild it here when it's due.
+    const payload = reveal ?? (room.phase === "reveal" ? this.computeReveal(room) : null);
+    this.emitter.toRoom(room.code, "room:state", buildSnapshot(room, payload));
   }
 
   /** Send each connected player their private role (during role/discussion). */
@@ -134,7 +139,7 @@ export class GameManager {
       word: null,
       hint: null,
       hasVoted: false,
-      votedFor: null,
+      votedFor: [],
     } as RoomPlayer;
   }
 
@@ -378,7 +383,7 @@ export class GameManager {
 
     for (const p of room.players) {
       p.hasVoted = false;
-      p.votedFor = null;
+      p.votedFor = [];
       if (p.connected && roles[p.userId]) {
         p.role = roles[p.userId];
         if (p.role === "imposter") {
@@ -487,7 +492,7 @@ export class GameManager {
     });
   }
 
-  async handleCastVote(code: string, voterId: string, targetId: string): Promise<AckResult> {
+  async handleCastVote(code: string, voterId: string, targetIds: string[]): Promise<AckResult> {
     return this.withLock(code, async () => {
       const room = await this.load(code);
       if (!room) return { ok: false, error: "Room not found" };
@@ -497,12 +502,21 @@ export class GameManager {
       if (!voter || !voter.connected) return { ok: false, error: "You are not in this round" };
       if (voter.hasVoted) return { ok: false, error: "You already voted" };
 
-      const target = room.players.find((p) => p.userId === targetId && p.connected);
-      if (!target) return { ok: false, error: "Invalid vote target" };
-      if (targetId === voterId) return { ok: false, error: "You cannot vote for yourself" };
+      // Each player casts one vote per imposter, all at once as a ballot.
+      const connectedCount = room.players.filter((p) => p.connected).length;
+      const quota = clampImposters(room.settings.imposterCount, connectedCount);
+      const ballot = Array.from(new Set(targetIds)); // de-dupe
+      if (ballot.length !== quota) {
+        return { ok: false, error: `Pick exactly ${quota} player${quota > 1 ? "s" : ""} to vote out` };
+      }
+      for (const targetId of ballot) {
+        if (targetId === voterId) return { ok: false, error: "You cannot vote for yourself" };
+        const target = room.players.find((p) => p.userId === targetId && p.connected);
+        if (!target) return { ok: false, error: "Invalid vote target" };
+      }
 
       voter.hasVoted = true;
-      voter.votedFor = targetId;
+      voter.votedFor = ballot;
       await room.save();
       this.broadcast(room);
       this.notice(code, { type: "vote_cast", voterName: voter.displayName });
@@ -535,15 +549,17 @@ export class GameManager {
         "";
       const imposterHint = connected.find((p) => p.role === "imposter")?.hint ?? "";
 
-      const votes = voters.map((p) => {
-        const t = room.players.find((x) => x.userId === p.votedFor);
-        return {
-          voterId: p.userId,
-          voterName: p.displayName,
-          targetId: p.votedFor!,
-          targetName: t?.displayName ?? "Unknown",
-        };
-      });
+      const votes = voters.flatMap((p) =>
+        (p.votedFor ?? []).map((targetId) => {
+          const t = room.players.find((x) => x.userId === targetId);
+          return {
+            voterId: p.userId,
+            voterName: p.displayName,
+            targetId,
+            targetName: t?.displayName ?? "Unknown",
+          };
+        }),
+      );
 
       const reveal = resolveRound({
         votes,
@@ -616,30 +632,31 @@ export class GameManager {
     }
 
     // Re-emit the current snapshot to just this user (post-refresh hydration).
-    let reveal = null;
-    if (room.phase === "reveal") {
-      // Rebuild reveal for late/refreshed clients.
-      reveal = await this.rebuildReveal(room);
-    }
+    // Rebuild the reveal for late/refreshed clients so they never hydrate into
+    // an empty (perpetually-loading) reveal screen.
+    const reveal = room.phase === "reveal" ? this.computeReveal(room) : null;
     this.emitter.toUser(code, userId, "room:state", buildSnapshot(room, reveal));
     await this.emitRoleTo(code, userId);
   }
 
-  private async rebuildReveal(room: RoomDoc) {
+  /** Synchronously reconstruct the reveal result from server-only round fields. */
+  private computeReveal(room: RoomDoc) {
     const connected = room.players.filter((p) => p.role !== null);
     const imposterIds = connected.filter((p) => p.role === "imposter").map((p) => p.userId);
     const realWord = connected.find((p) => p.role === "player")?.word ?? "";
     const imposterHint = connected.find((p) => p.role === "imposter")?.hint ?? "";
     const voters = room.players.filter((p) => p.hasVoted);
-    const votes = voters.map((p) => {
-      const t = room.players.find((x) => x.userId === p.votedFor);
-      return {
-        voterId: p.userId,
-        voterName: p.displayName,
-        targetId: p.votedFor!,
-        targetName: t?.displayName ?? "Unknown",
-      };
-    });
+    const votes = voters.flatMap((p) =>
+      (p.votedFor ?? []).map((targetId) => {
+        const t = room.players.find((x) => x.userId === targetId);
+        return {
+          voterId: p.userId,
+          voterName: p.displayName,
+          targetId,
+          targetName: t?.displayName ?? "Unknown",
+        };
+      }),
+    );
     return resolveRound({
       votes,
       imposterIds,

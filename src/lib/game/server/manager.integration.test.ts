@@ -132,10 +132,10 @@ describe("GameManager full round", () => {
 
     // All 3 normal players vote for the imposter; imposter votes for a player.
     for (const p of players) {
-      const res = await manager.handleCastVote("TEST01", p.userId, imposter.userId);
+      const res = await manager.handleCastVote("TEST01", p.userId, [imposter.userId]);
       expect(res.ok).toBe(true);
     }
-    const impVote = await manager.handleCastVote("TEST01", imposter.userId, players[0].userId);
+    const impVote = await manager.handleCastVote("TEST01", imposter.userId, [players[0].userId]);
     expect(impVote.ok).toBe(true);
 
     // Host reveals.

@@ -86,10 +86,12 @@ export interface RoomSnapshot {
   timerEndsAt: number | null;
   /** Live votes so far (voter->target), safe to show everyone. */
   votes: PublicVote[];
-  /** Number of players who have voted. */
+  /** Number of players who have completed their ballot. */
   votesCast: number;
   /** Total number of connected players expected to vote. */
   votesTotal: number;
+  /** How many votes each player casts this round (= number of imposters). */
+  voteQuota: number;
   /** Category of the current round's word (safe — same for imposters & players). */
   category: string | null;
   /** Populated only in the reveal phase. */

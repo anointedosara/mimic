@@ -22,7 +22,7 @@ export interface RoomPlayer {
   word: string | null; // real word (normal players only)
   hint: string | null; // imposter hint (imposters only)
   hasVoted: boolean;
-  votedFor: string | null; // userId this player voted for
+  votedFor: string[]; // userIds this player voted for (one per imposter)
 }
 
 export interface RoomDoc extends mongoose.Document {
@@ -59,7 +59,7 @@ const RoomPlayerSchema = new Schema<RoomPlayer>(
     word: { type: String, default: null },
     hint: { type: String, default: null },
     hasVoted: { type: Boolean, default: false },
-    votedFor: { type: String, default: null },
+    votedFor: { type: [String], default: [] },
   },
   { _id: false },
 );

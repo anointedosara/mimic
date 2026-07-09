@@ -80,7 +80,16 @@ export function useVoice(code: string, selfId: string) {
   // --- speaking detection (single rAF over all analysers) -------------------
   const startMeter = useCallback(() => {
     if (rafRef.current != null) return;
-    const tick = () => {
+    let last = 0;
+    const tick = (now: number) => {
+      // Throttle to ~12fps: sampling every frame wastes CPU across a full mesh
+      // of analysers and can starve the audio decode thread (making one device
+      // lag behind). This cadence is plenty for a speaking indicator.
+      if (now - last < 80) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      last = now;
       const micOn = store.getState().micOn;
       for (const [userId, node] of analysersRef.current) {
         node.analyser.getByteTimeDomainData(node.data);
@@ -183,6 +192,22 @@ export function useVoice(code: string, selfId: string) {
           /* autoplay blocked until a gesture; join click usually satisfies it */
         });
         attachAnalyser(userId, stream);
+        // Keep latency low: on a lossy/relayed path the jitter buffer can grow
+        // until you're hearing audio "seconds behind". These (widely-shipped but
+        // still non-standard) hints tell the browser to favour low delay over
+        // extra buffering, so voice stays close to live.
+        try {
+          const r = e.receiver as RTCRtpReceiver & {
+            playoutDelayHint?: number;
+            jitterBufferTarget?: number | null;
+          };
+          if (r) {
+            if ("playoutDelayHint" in r) r.playoutDelayHint = 0;
+            if ("jitterBufferTarget" in r) r.jitterBufferTarget = 0;
+          }
+        } catch {
+          /* hints unsupported on this browser — ignore */
+        }
       };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed" || pc.connectionState === "closed") {

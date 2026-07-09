@@ -43,3 +43,9 @@ export async function authedAction(req: Request, action: Action): Promise<NextRe
 export function str(v: unknown): string {
   return typeof v === "string" ? v : String(v ?? "");
 }
+
+/** Coerce an unknown body value into a string[] (non-strings dropped). */
+export function strArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string");
+}

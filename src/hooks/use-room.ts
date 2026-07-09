@@ -107,13 +107,23 @@ export function useRoom(code: string) {
     // Silent self-heal: re-request the authoritative snapshot every ~75s. This
     // keeps everyone in sync and recovers any stuck UI without a page reload or
     // dropping voice — nothing visibly changes when state is already current.
-    const resync = setInterval(() => {
+    const resync = () => {
       if (ably.connection.state === "connected") void postAction(`/api/room/${upper}/sync`);
-    }, 75_000);
+    };
+    const resyncTimer = setInterval(resync, 75_000);
+
+    // Catch up the instant the tab is refocused (returning from a backgrounded
+    // mobile tab, waking a laptop) rather than waiting for the next tick — so a
+    // player rejoins mid-game exactly where everyone else is.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") resync();
+    };
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       if (retry) clearTimeout(retry);
-      clearInterval(resync);
+      clearInterval(resyncTimer);
+      document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("pagehide", onUnload);
       room.unsubscribe("room:state", onState);
       room.unsubscribe("room:notice", onNotice);
@@ -214,8 +224,8 @@ export const roomActions = {
     postAction(`/api/room/${code.toUpperCase()}/kick`, { userId }),
   start: (code: string) => postAction(`/api/game/${code.toUpperCase()}/start`),
   voteEarly: (code: string) => postAction(`/api/game/${code.toUpperCase()}/voteEarly`),
-  castVote: (code: string, targetId: string) =>
-    postAction(`/api/game/${code.toUpperCase()}/castVote`, { targetId }),
+  castVote: (code: string, targetIds: string[]) =>
+    postAction(`/api/game/${code.toUpperCase()}/castVote`, { targetIds }),
   reveal: (code: string) => postAction(`/api/game/${code.toUpperCase()}/reveal`),
   advanceNow: (code: string) => postAction(`/api/game/${code.toUpperCase()}/advance-now`),
   playAgain: (code: string) => postAction(`/api/game/${code.toUpperCase()}/playAgain`),

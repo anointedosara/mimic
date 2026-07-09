@@ -4,6 +4,7 @@
 
 import type { RoomDoc } from "@/lib/db/models/Room";
 import type { PrivateRole, PublicPlayer, PublicVote, RoomSnapshot } from "@/lib/game/types";
+import { clampImposters } from "@/lib/game/config";
 
 export function buildPublicPlayers(room: RoomDoc): PublicPlayer[] {
   // Dedupe by userId as a final safety net: a duplicate entry (e.g. from a
@@ -28,15 +29,17 @@ export function buildPublicPlayers(room: RoomDoc): PublicPlayer[] {
 }
 
 export function buildPublicVotes(room: RoomDoc): PublicVote[] {
-  // Live votes are public (voter -> target). This does NOT reveal roles.
+  // Live votes are public (voter -> target). Each voter casts a ballot of one
+  // vote per imposter, expanded here into a flat list. This does NOT reveal roles.
   const votes: PublicVote[] = [];
   for (const p of room.players) {
-    if (p.hasVoted && p.votedFor) {
-      const target = room.players.find((t) => t.userId === p.votedFor);
+    if (!p.hasVoted) continue;
+    for (const targetId of p.votedFor ?? []) {
+      const target = room.players.find((t) => t.userId === targetId);
       votes.push({
         voterId: p.userId,
         voterName: p.displayName,
-        targetId: p.votedFor,
+        targetId,
         targetName: target?.displayName ?? "Unknown",
       });
     }
@@ -54,6 +57,7 @@ export function buildSnapshot(
 ): RoomSnapshot {
   const connectedCount = room.players.filter((p) => p.connected).length;
   const votesCast = room.players.filter((p) => p.hasVoted).length;
+  const voteQuota = clampImposters(room.settings.imposterCount, connectedCount);
 
   return {
     code: room.code,
@@ -70,6 +74,7 @@ export function buildSnapshot(
     votes: buildPublicVotes(room),
     votesCast,
     votesTotal: connectedCount,
+    voteQuota,
     category: room.currentCategory,
     reveal,
   };

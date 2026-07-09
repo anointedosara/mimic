@@ -16,7 +16,7 @@ export interface ClientToServerEvents {
   "game:start": (payload: { code: string }, ack: (res: AckResult) => void) => void;
   "game:voteEarly": (payload: { code: string }, ack: (res: AckResult) => void) => void;
   "game:castVote": (
-    payload: { code: string; targetId: string },
+    payload: { code: string; targetIds: string[] },
     ack: (res: AckResult) => void,
   ) => void;
   "game:reveal": (payload: { code: string }, ack: (res: AckResult) => void) => void;
