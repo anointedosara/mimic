@@ -23,19 +23,29 @@ function appBaseUrl(): string {
   return "http://localhost:3000";
 }
 
-function advanceUrl(code: string): string {
-  return `${appBaseUrl()}/api/game/${encodeURIComponent(code)}/advance`;
+function callbackUrl(code: string, kind: Job["kind"]): string {
+  const path = kind === "ai" ? "ai-tick" : "advance";
+  return `${appBaseUrl()}/api/game/${encodeURIComponent(code)}/${path}`;
+}
+
+interface Job {
+  code: string;
+  delayMs: number;
+  kind: "advance" | "ai";
 }
 
 export function createScheduler(): FlushableScheduler {
-  const jobs: { code: string; delayMs: number }[] = [];
+  const jobs: Job[] = [];
 
   return {
     armAdvance(code, delayMs) {
-      jobs.push({ code, delayMs });
+      jobs.push({ code, delayMs, kind: "advance" });
+    },
+    armAI(code, delayMs) {
+      jobs.push({ code, delayMs, kind: "ai" });
     },
     cancel() {
-      // no-op — advancePhase() is self-guarding (see file header).
+      // no-op — advancePhase()/aiChatTick() are self-guarding (see file header).
     },
     async flush() {
       if (jobs.length === 0) return;
@@ -46,7 +56,7 @@ export function createScheduler(): FlushableScheduler {
         await Promise.all(
           pending.map((j) =>
             qstash.publishJSON({
-              url: advanceUrl(j.code),
+              url: callbackUrl(j.code, j.kind),
               body: { code: j.code },
               delay: Math.max(0, Math.ceil(j.delayMs / 1000)), // QStash delay is in seconds
             }),
@@ -61,8 +71,10 @@ export function createScheduler(): FlushableScheduler {
         setTimeout(
           () => {
             void import("@/lib/game/runtime")
-              .then(({ advanceRoom }) => advanceRoom(j.code))
-              .catch((e) => console.error("[scheduler:dev] advance failed", e));
+              .then(({ advanceRoom, runAITick }) =>
+                j.kind === "ai" ? runAITick(j.code) : advanceRoom(j.code),
+              )
+              .catch((e) => console.error(`[scheduler:dev] ${j.kind} failed`, e));
           },
           Math.max(0, j.delayMs),
         );

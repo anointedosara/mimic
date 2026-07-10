@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Crown, X, Check, Wifi, WifiOff, Mic } from "lucide-react";
+import { Crown, X, Check, Wifi, WifiOff, Mic, Bot } from "lucide-react";
 import type { PublicPlayer } from "@/lib/game/types";
 import { AvatarDisplay } from "@/components/avatar-display";
 import { Badge } from "@/components/ui/badge";
@@ -86,7 +86,12 @@ export function PlayerTile({
 
         <div className="w-full">
           <div className="flex items-center justify-center gap-1">
-            <span className="max-w-[8rem] truncate text-sm font-semibold">{player.displayName}</span>
+            <span className="max-w-[7rem] truncate text-sm font-semibold">{player.displayName}</span>
+            {player.isAI && (
+              <Badge variant="outline" className="gap-0.5 px-1 py-0 text-[9px]">
+                <Bot className="h-2.5 w-2.5" /> AI
+              </Badge>
+            )}
           </div>
           {isSelf && <span className="text-[10px] uppercase tracking-wider text-primary">You</span>}
           {player.roundsWon > 0 && (

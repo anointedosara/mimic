@@ -12,6 +12,13 @@
 export interface Scheduler {
   /** Schedule an idempotent phase-advance for a room after delayMs. */
   armAdvance(code: string, delayMs: number): void;
+  /**
+   * Schedule the next AI discussion "turn" for a room after delayMs. The tick
+   * posts one AI chat line and re-arms itself, so AI banter continues through
+   * the discussion. Self-guarding: a tick outside the discussion phase is a
+   * no-op and stops the chain.
+   */
+  armAI(code: string, delayMs: number): void;
   /** Best-effort cancel. Safe to no-op — advance() guards itself anyway. */
   cancel(code: string): void;
 }

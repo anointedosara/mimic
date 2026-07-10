@@ -96,6 +96,13 @@ export type RoomNotice =
   | { type: "vote_cast"; voterName: string }
   | { type: "all_voted" }
   | { type: "revealed" }
-  | { type: "new_round" };
+  | { type: "new_round" }
+  | { type: "players_filled"; count: number };
+
+/** Transient typing indicator, broadcast to the room (never persisted). */
+export interface TypingSignal {
+  userId: string;
+  name: string;
+}
 
 export const SOCKET_PATH = "/api/socketio";

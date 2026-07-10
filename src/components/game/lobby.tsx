@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Play, Loader2, Users, Skull, Clock, Settings2 } from "lucide-react";
+import { Play, Loader2, Users, Skull, Clock, Settings2, Bot } from "lucide-react";
 import { toast } from "sonner";
 import type { RoomSnapshot } from "@/lib/game/types";
 import { PlayerTile } from "./player-tile";
@@ -17,12 +17,16 @@ import { playSound } from "@/lib/sounds";
 export function Lobby({ snapshot, selfId }: { snapshot: RoomSnapshot; selfId: string }) {
   const isHost = snapshot.hostId === selfId;
   const [starting, setStarting] = useState(false);
+  const [filling, setFilling] = useState(false);
   const [savingSetting, setSavingSetting] = useState(false);
 
   const players = snapshot.players;
   const filled = players.length;
   const cap = snapshot.settings.maxPlayers;
   const canStart = filled >= 3;
+  const openSlots = Math.max(0, cap - filled);
+  const humanCount = players.filter((p) => !p.isAI).length;
+  const aiCount = filled - humanCount;
   const impMax = maxImposters(cap);
 
   async function start() {
@@ -30,6 +34,14 @@ export function Lobby({ snapshot, selfId }: { snapshot: RoomSnapshot; selfId: st
     const res = await roomActions.start(snapshot.code);
     setStarting(false);
     if (!res.ok) toast.error(res.error ?? "Could not start");
+  }
+
+  async function fillWithAI() {
+    setFilling(true);
+    playSound("click");
+    const res = await roomActions.fillWithAI(snapshot.code);
+    setFilling(false);
+    if (!res.ok) toast.error(res.error ?? "Could not add AI players");
   }
 
   async function updateSetting(patch: Record<string, number>) {
@@ -61,6 +73,11 @@ export function Lobby({ snapshot, selfId }: { snapshot: RoomSnapshot; selfId: st
             <div className="flex justify-between text-sm">
               <span className="font-semibold">
                 {filled} / {cap} joined
+                {aiCount > 0 && (
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    ({humanCount} human{humanCount === 1 ? "" : "s"} · {aiCount} AI)
+                  </span>
+                )}
               </span>
               <span className="text-muted-foreground">Min 3 to start</span>
             </div>
@@ -152,16 +169,34 @@ export function Lobby({ snapshot, selfId }: { snapshot: RoomSnapshot; selfId: st
 
       <div className="sticky bottom-4 z-10">
         {isHost ? (
-          <Button
-            variant="gradient"
-            size="lg"
-            className="w-full glow"
-            disabled={!canStart || starting}
-            onClick={start}
-          >
-            {starting ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
-            {canStart ? "Start game" : `Need ${3 - filled} more player${3 - filled === 1 ? "" : "s"}`}
-          </Button>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              variant="gradient"
+              size="lg"
+              className="flex-1 glow"
+              disabled={!canStart || starting}
+              onClick={start}
+            >
+              {starting ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
+              {canStart
+                ? openSlots > 0
+                  ? "Start now"
+                  : "Start game"
+                : `Need ${3 - filled} more player${3 - filled === 1 ? "" : "s"}`}
+            </Button>
+            {openSlots > 0 && (
+              <Button
+                variant="outline"
+                size="lg"
+                className="flex-1"
+                disabled={filling}
+                onClick={fillWithAI}
+              >
+                {filling ? <Loader2 className="h-5 w-5 animate-spin" /> : <Bot className="h-5 w-5" />}
+                Fill {openSlots} spot{openSlots === 1 ? "" : "s"} with AI
+              </Button>
+            )}
+          </div>
         ) : (
           <div className="glass rounded-2xl p-4 text-center text-sm text-muted-foreground">
             Waiting for the host to start the game…

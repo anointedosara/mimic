@@ -33,6 +33,23 @@ export interface PublicPlayer {
   hasVoted: boolean;
   /** Score across rounds in this room session. */
   roundsWon: number;
+  /** Computer-controlled player (filled slot). Shown with an "AI" badge. */
+  isAI: boolean;
+}
+
+/** A public chat message, broadcast to everyone in the room. */
+export interface ChatMessage {
+  id: string;
+  userId: string;
+  name: string;
+  avatar: string;
+  isAI: boolean;
+  text: string;
+  /** Epoch ms the message was posted. */
+  at: number;
+  replyTo: string | null;
+  reactions: { emoji: string; userIds: string[] }[];
+  scope: "lobby" | "table" | "spectator";
 }
 
 /**
@@ -96,4 +113,6 @@ export interface RoomSnapshot {
   category: string | null;
   /** Populated only in the reveal phase. */
   reveal: RevealResult | null;
+  /** Recent chat messages (lobby, table & spectator), oldest first. */
+  messages: ChatMessage[];
 }

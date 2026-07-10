@@ -30,7 +30,7 @@ function createMockDeps() {
     },
   };
   // Timers are irrelevant to this test; record nothing.
-  const scheduler = { armAdvance() {}, cancel() {} };
+  const scheduler = { armAdvance() {}, armAI() {}, cancel() {} };
   return { emitter, scheduler, emissions };
 }
 
@@ -159,5 +159,103 @@ describe("GameManager full round", () => {
     expect(updated!.statistics.timesAsImposter).toBe(1);
     expect(updated!.statistics.timesCaught).toBe(1);
     expect(updated!.statistics.losses).toBe(1);
+  }, 30_000);
+});
+
+describe("GameManager hybrid (AI players) + chat", () => {
+  it("fills empty slots with AI that play and chat, and never lets AI host", async () => {
+    const { emitter, scheduler, emissions } = createMockDeps();
+    const manager = new GameManager(emitter, scheduler);
+
+    const host = await User.create({
+      displayName: "Zoe",
+      email: "zoe@t.co",
+      passwordHash: "x",
+      avatar: "fox",
+    });
+    const hostId = host._id.toString();
+
+    await Room.create({
+      code: "TEST02",
+      hostId,
+      phase: "lobby",
+      settings: { maxPlayers: 4, imposterCount: 1, durationSeconds: 60 },
+      players: [],
+    });
+
+    // Host joins alone, then fills the remaining 3 slots with AI.
+    expect((await manager.handleJoin("TEST02", { id: hostId, displayName: "Zoe", avatar: "fox" })).ok).toBe(true);
+
+    // Chat works in the lobby.
+    expect((await manager.handleChat("TEST02", hostId, "hey anyone?", null)).ok).toBe(true);
+
+    const fill = await manager.handleFillWithAI("TEST02", hostId);
+    expect(fill.ok).toBe(true);
+
+    let doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.players).toHaveLength(4);
+    const ai = doc!.players.filter((p) => p.isAI);
+    expect(ai).toHaveLength(3);
+    // AI never host; each has a personality + an ai_ id.
+    expect(ai.every((p) => !p.isHost && p.personality && p.userId.startsWith("ai_"))).toBe(true);
+    expect(doc!.hostId).toBe(hostId);
+
+    // Public snapshot exposes isAI + messages, still no secrets.
+    const lobbySnap = [...emissions].reverse().find((e) => e.event === "room:state");
+    const ls = lobbySnap!.payload as RoomSnapshot;
+    expect(ls.players.some((p) => p.isAI)).toBe(true);
+    expect(ls.messages.some((m) => m.text === "hey anyone?" && m.scope === "lobby")).toBe(true);
+
+    // Start → role → discussion (AI drop opening chat lines).
+    expect((await manager.handleStart("TEST02", hostId)).ok).toBe(true);
+    await manager.advancePhase("TEST02"); // role → discussion
+
+    doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.phase).toBe("discussion");
+    const aiOpeners = doc!.messages.filter((m) => m.isAI && m.scope === "table" && m.round === doc!.round);
+    expect(aiOpeners.length).toBeGreaterThan(0);
+
+    // The AI banter chain keeps posting contextual lines during discussion.
+    const before = aiOpeners.length;
+    for (let i = 0; i < 3; i++) await manager.aiChatTick("TEST02");
+    doc = await Room.findOne({ code: "TEST02" });
+    const aiLines = doc!.messages.filter((m) => m.isAI && m.scope === "table" && m.round === doc!.round);
+    expect(aiLines.length).toBeGreaterThan(before);
+
+    // Any participant can trigger the vote; AI vote the instant it opens.
+    expect((await manager.handleVoteEarly("TEST02", hostId)).ok).toBe(true);
+    doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.phase).toBe("voting");
+    expect(doc!.players.filter((p) => p.isAI).every((p) => p.hasVoted)).toBe(true);
+
+    // Host casts the last vote, then reveals — AI votes count, no stats crash.
+    const someTarget = doc!.players.find((p) => p.userId !== hostId)!;
+    expect((await manager.handleCastVote("TEST02", hostId, [someTarget.userId])).ok).toBe(true);
+    const reveal = await manager.handleReveal("TEST02", hostId);
+    expect(reveal.ok).toBe(true);
+
+    // Host got stats; AI have no accounts so none were created for them.
+    const hostAfter = await User.findById(hostId);
+    expect(hostAfter!.statistics.gamesPlayed).toBe(1);
+    expect(await User.countDocuments({})).toBeGreaterThan(0);
+
+    // A reaction toggles on and off.
+    doc = await Room.findOne({ code: "TEST02" });
+    const msgId = doc!.messages[0].id;
+    await manager.handleReact("TEST02", hostId, msgId, "🔥");
+    doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.messages.find((m) => m.id === msgId)!.reactions[0]).toMatchObject({
+      emoji: "🔥",
+      userIds: [hostId],
+    });
+    await manager.handleReact("TEST02", hostId, msgId, "🔥");
+    doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.messages.find((m) => m.id === msgId)!.reactions).toHaveLength(0);
+
+    // Even if the only human drops, the crown never moves to an AI.
+    await manager.handleDisconnect("TEST02", hostId);
+    doc = await Room.findOne({ code: "TEST02" });
+    expect(doc!.hostId).toBe(hostId);
+    expect(doc!.players.find((p) => p.isHost)!.isAI).toBe(false);
   }, 30_000);
 });

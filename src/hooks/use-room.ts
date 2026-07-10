@@ -7,7 +7,8 @@ import { getAbly } from "@/lib/ably/client";
 import { roomChannel, userChannel } from "@/lib/ably/channels";
 import { postAction, beaconAction } from "@/lib/api/client";
 import { useGameStore } from "@/store/game-store";
-import type { RoomNotice } from "@/lib/game/events";
+import { useChatStore } from "@/store/chat-store";
+import type { RoomNotice, TypingSignal } from "@/lib/game/events";
 import { playSound } from "@/lib/sounds";
 import { toast } from "sonner";
 
@@ -75,6 +76,10 @@ export function useRoom(code: string) {
     const onState = (msg: Ably.Message) => setSnapshot(msg.data);
     const onRole = (msg: Ably.Message) => setRole(msg.data);
     const onNotice = (msg: Ably.Message) => handleNotice(msg.data as RoomNotice);
+    const onTyping = (msg: Ably.Message) => {
+      const t = msg.data as TypingSignal;
+      if (t?.userId && t.userId !== userId) useChatStore.getState().noteTyping(t.userId, t.name);
+    };
     const onClosed = (msg: Ably.Message) => {
       toast.error((msg.data?.reason as string) || "The room was closed");
       reset();
@@ -83,6 +88,7 @@ export function useRoom(code: string) {
 
     room.subscribe("room:state", onState);
     room.subscribe("room:notice", onNotice);
+    room.subscribe("room:typing", onTyping);
     mine.subscribe("room:state", onState);
     mine.subscribe("game:role", onRole);
     mine.subscribe("room:closed", onClosed);
@@ -127,6 +133,7 @@ export function useRoom(code: string) {
       window.removeEventListener("pagehide", onUnload);
       room.unsubscribe("room:state", onState);
       room.unsubscribe("room:notice", onNotice);
+      room.unsubscribe("room:typing", onTyping);
       mine.unsubscribe("room:state", onState);
       mine.unsubscribe("game:role", onRole);
       mine.unsubscribe("room:closed", onClosed);
@@ -213,6 +220,10 @@ function handleNotice(n: RoomNotice) {
     case "new_round":
       toast("New round!", { icon: "🔄" });
       break;
+    case "players_filled":
+      playSound("join");
+      toast(`${n.count} AI player${n.count === 1 ? "" : "s"} added`, { icon: "🤖" });
+      break;
   }
 }
 
@@ -222,6 +233,7 @@ export const roomActions = {
     postAction(`/api/room/${code.toUpperCase()}/settings`, { settings }),
   kick: (code: string, userId: string) =>
     postAction(`/api/room/${code.toUpperCase()}/kick`, { userId }),
+  fillWithAI: (code: string) => postAction(`/api/room/${code.toUpperCase()}/fill-ai`),
   start: (code: string) => postAction(`/api/game/${code.toUpperCase()}/start`),
   voteEarly: (code: string) => postAction(`/api/game/${code.toUpperCase()}/voteEarly`),
   castVote: (code: string, targetIds: string[]) =>
@@ -230,4 +242,13 @@ export const roomActions = {
   advanceNow: (code: string) => postAction(`/api/game/${code.toUpperCase()}/advance-now`),
   playAgain: (code: string) => postAction(`/api/game/${code.toUpperCase()}/playAgain`),
   leave: (code: string) => postAction(`/api/room/${code.toUpperCase()}/leave`),
+};
+
+// --- chat action helpers ----------------------------------------------------
+export const chatActions = {
+  send: (code: string, text: string, replyTo: string | null) =>
+    postAction(`/api/room/${code.toUpperCase()}/chat`, { text, replyTo }),
+  react: (code: string, messageId: string, emoji: string) =>
+    postAction(`/api/room/${code.toUpperCase()}/chat/react`, { messageId, emoji }),
+  typing: (code: string) => postAction(`/api/room/${code.toUpperCase()}/chat/typing`),
 };

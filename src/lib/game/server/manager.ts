@@ -16,7 +16,7 @@
 import { connectToDatabase } from "@/lib/db/mongoose";
 import { Room, type RoomDoc, type RoomPlayer } from "@/lib/db/models/Room";
 import { User } from "@/lib/db/models/User";
-import { assignRoles, resolveRound } from "@/lib/game/engine";
+import { assignRoles, resolveRound, shuffle } from "@/lib/game/engine";
 import { clampImposters, clampPlayers, clampDuration } from "@/lib/game/config";
 import type { RoomSettings } from "@/lib/game/types";
 import type { AckResult, RoomNotice } from "@/lib/game/events";
@@ -24,6 +24,22 @@ import type { Emitter } from "@/lib/game/emitter";
 import type { Scheduler } from "@/lib/game/scheduler";
 import { buildPrivateRole, buildSnapshot } from "./snapshot";
 import { pickWord } from "./words";
+import {
+  buildAIPlayers,
+  computeRoomAIBallots,
+  aiOpeningLine,
+  aiDiscussionTurn,
+  isAIUserId,
+} from "./ai-players";
+import { makeId } from "@/lib/passplay/storage";
+
+/** Keep only the most recent N chat messages persisted per room. */
+const MAX_MESSAGES = 120;
+/** Stop AI banter this many ms before the discussion timer ends. */
+const AI_CHAT_END_BUFFER_MS = 3000;
+/** Random gap between AI discussion lines. */
+const AI_CHAT_MIN_MS = 3200;
+const AI_CHAT_MAX_MS = 6800;
 
 const ROLE_PHASE_MS = 5000; // brief personal-role reveal before discussion
 // A host who drops (refresh, backgrounded tab, flaky network) keeps the crown
@@ -111,7 +127,8 @@ export class GameManager {
         Date.now() - new Date(host.disconnectedAt).getTime() < HOST_GRACE_MS);
     if (host && withinGrace) return null;
 
-    const successor = room.players.find((p) => p.connected);
+    // Only a connected HUMAN can hold the crown — AI seats never host.
+    const successor = room.players.find((p) => p.connected && !p.isAI);
     if (!successor) return null; // nobody to hand off to — leave host as-is
     if (successor.isHost) {
       room.hostId = successor.userId;
@@ -135,6 +152,8 @@ export class GameManager {
       disconnectedAt: null,
       joinedAt: new Date(),
       roundsWon: 0,
+      isAI: false,
+      personality: null,
       role: null,
       word: null,
       hint: null,
@@ -303,6 +322,122 @@ export class GameManager {
     });
   }
 
+  /**
+   * Host action: fill every empty slot with AI players so a game can start
+   * without waiting for more humans. Lobby-only.
+   */
+  async handleFillWithAI(code: string, hostId: string): Promise<AckResult> {
+    return this.withLock(code, async () => {
+      const room = await this.load(code);
+      if (!room) return { ok: false, error: "Room not found" };
+      if (room.hostId !== hostId) return { ok: false, error: "Only the host can add AI players" };
+      if (room.phase !== "lobby") return { ok: false, error: "Can only add AI in the lobby" };
+
+      const open = room.settings.maxPlayers - room.players.length;
+      if (open <= 0) return { ok: false, error: "The room is already full" };
+
+      const ai = buildAIPlayers(room, open);
+      room.players.push(...(ai as typeof room.players));
+      await room.save();
+      this.broadcast(room);
+      this.notice(code, { type: "players_filled", count: ai.length });
+      return { ok: true };
+    });
+  }
+
+  // --- chat ----------------------------------------------------------------
+  /** Post a chat message. Scope is derived from the phase + sender's role. */
+  async handleChat(
+    code: string,
+    userId: string,
+    text: string,
+    replyTo: string | null,
+  ): Promise<AckResult> {
+    const clean = (text ?? "").toString().replace(/\s+/g, " ").trim().slice(0, 300);
+    if (!clean) return { ok: false, error: "Empty message" };
+
+    return this.withLock(code, async () => {
+      const room = await this.load(code);
+      if (!room) return { ok: false, error: "Room not found" };
+      const sender = room.players.find((p) => p.userId === userId);
+      if (!sender) return { ok: false, error: "You are not in this room" };
+
+      // Lobby chatter, in-round table talk, or spectator commentary (a player
+      // with no role this round). Spectators are visibly tagged; they can watch
+      // and comment but their words are marked so active players know.
+      const scope: "lobby" | "table" | "spectator" =
+        room.phase === "lobby" ? "lobby" : sender.role !== null ? "table" : "spectator";
+
+      const valid = replyTo && room.messages.some((m) => m.id === replyTo) ? replyTo : null;
+
+      room.messages.push({
+        id: makeId(),
+        userId: sender.userId,
+        name: sender.displayName,
+        avatar: sender.avatar,
+        isAI: false,
+        text: clean,
+        at: new Date(),
+        replyTo: valid,
+        reactions: [],
+        scope,
+        round: room.round,
+      } as RoomDoc["messages"][number]);
+      this.trimMessages(room);
+
+      await room.save();
+      this.broadcast(room);
+      return { ok: true };
+    });
+  }
+
+  /** Toggle an emoji reaction on a message for this user. */
+  async handleReact(
+    code: string,
+    userId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<AckResult> {
+    const e = (emoji ?? "").toString().slice(0, 8);
+    if (!e) return { ok: false, error: "No emoji" };
+
+    return this.withLock(code, async () => {
+      const room = await this.load(code);
+      if (!room) return { ok: false, error: "Room not found" };
+      if (!room.players.some((p) => p.userId === userId)) {
+        return { ok: false, error: "You are not in this room" };
+      }
+      const msg = room.messages.find((m) => m.id === messageId);
+      if (!msg) return { ok: false, error: "Message not found" };
+
+      const entry = msg.reactions.find((r) => r.emoji === e);
+      if (!entry) {
+        msg.reactions.push({ emoji: e, userIds: [userId] });
+      } else if (entry.userIds.includes(userId)) {
+        entry.userIds = entry.userIds.filter((u) => u !== userId);
+        if (entry.userIds.length === 0) {
+          msg.reactions = msg.reactions.filter((r) => r.emoji !== e);
+        }
+      } else {
+        entry.userIds.push(userId);
+      }
+      room.markModified("messages");
+      await room.save();
+      this.broadcast(room);
+      return { ok: true };
+    });
+  }
+
+  /** Broadcast a transient "is typing" signal. Never persisted or locked. */
+  async handleTyping(code: string, userId: string): Promise<AckResult> {
+    const room = await this.load(code);
+    if (!room) return { ok: false, error: "Room not found" };
+    const p = room.players.find((pl) => pl.userId === userId);
+    if (!p) return { ok: false, error: "You are not in this room" };
+    this.emitter.toRoom(code, "room:typing", { userId, name: p.displayName });
+    return { ok: true };
+  }
+
   async handleUpdateSettings(
     code: string,
     hostId: string,
@@ -458,13 +593,121 @@ export class GameManager {
       if (!room || room.phase !== "role") return;
       room.phase = "discussion";
       room.timerEndsAt = new Date(Date.now() + room.settings.durationSeconds * 1000);
+      this.postAIOpeners(room);
       await room.save();
       this.broadcast(room);
       this.emitRoles(room);
 
       const ms = room.timerEndsAt.getTime() - Date.now();
       this.scheduler.armAdvance(code, ms);
+      // Kick off the AI banter chain if any AI are in the round.
+      if (room.players.some((p) => p.isAI && p.role !== null)) {
+        this.scheduler.armAI(code, this.aiChatDelay());
+      }
     });
+  }
+
+  private aiChatDelay(): number {
+    return AI_CHAT_MIN_MS + Math.floor(Math.random() * (AI_CHAT_MAX_MS - AI_CHAT_MIN_MS));
+  }
+
+  /**
+   * One AI discussion turn: post a single contextual line from an AI, then
+   * re-arm the next turn. Self-guarding — stops when discussion ends, the
+   * per-round budget is hit, or the timer is nearly up. Driven by the scheduler
+   * (QStash in prod, in-process in dev), so AI banter flows for the whole phase.
+   */
+  async aiChatTick(code: string) {
+    const keepGoing = await this.withLock(code, async () => {
+      const room = await this.load(code);
+      if (!room || room.phase !== "discussion") return false;
+      if (
+        room.timerEndsAt &&
+        Date.now() >= new Date(room.timerEndsAt).getTime() - AI_CHAT_END_BUFFER_MS
+      ) {
+        return false;
+      }
+      const aiCount = room.players.filter((p) => p.isAI && p.role !== null).length;
+      if (aiCount === 0) return false;
+
+      // Bound total AI chatter per round so it never spams.
+      const posted = (room.messages ?? []).filter(
+        (m) => m.isAI && m.scope === "table" && m.round === room.round,
+      ).length;
+      if (posted >= Math.min(aiCount * 6, 36)) return false;
+
+      const turn = aiDiscussionTurn(room);
+      if (turn) {
+        room.messages.push({
+          id: makeId(),
+          userId: turn.userId,
+          name: turn.name,
+          avatar: turn.avatar,
+          isAI: true,
+          text: turn.text,
+          at: new Date(),
+          replyTo: null,
+          reactions: [],
+          scope: "table",
+          round: room.round,
+        } as RoomDoc["messages"][number]);
+        this.trimMessages(room);
+        await room.save();
+        this.broadcast(room);
+      }
+      return true;
+    });
+
+    if (keepGoing) this.scheduler.armAI(code, this.aiChatDelay());
+  }
+
+  /**
+   * When discussion opens, each AI participant drops one clue-flavoured opening
+   * line into the table chat — so a hybrid game feels alive from the first beat.
+   * Idempotent per round (guards on this round's existing AI table messages).
+   */
+  private postAIOpeners(room: RoomDoc) {
+    const already = (room.messages ?? []).some(
+      (m) => m.isAI && m.scope === "table" && m.round === room.round,
+    );
+    if (already) return;
+    // Only a couple of AIs open the conversation; the banter chain carries the
+    // rest, so a big room doesn't get a wall of simultaneous openers.
+    const ais = shuffle(room.players.filter((p) => p.isAI && p.role !== null)).slice(0, 2);
+    if (ais.length === 0) return;
+
+    const used: string[] = [];
+    const base = Date.now();
+    let i = 0;
+    for (const ai of ais) {
+      const { text, word } = aiOpeningLine({
+        isImposter: ai.role === "imposter",
+        category: room.currentCategory ?? "",
+        used,
+      });
+      used.push(word.toLowerCase());
+      room.messages.push({
+        id: makeId(),
+        userId: ai.userId,
+        name: ai.displayName,
+        avatar: ai.avatar,
+        isAI: true,
+        text,
+        at: new Date(base + i * 1200), // stagger so they render in order
+        replyTo: null,
+        reactions: [],
+        scope: "table",
+        round: room.round,
+      } as RoomDoc["messages"][number]);
+      i++;
+    }
+    this.trimMessages(room);
+  }
+
+  private trimMessages(room: RoomDoc) {
+    if (room.messages.length > MAX_MESSAGES) {
+      room.messages = room.messages.slice(-MAX_MESSAGES) as typeof room.messages;
+    }
   }
 
   async handleVoteEarly(code: string, userId: string): Promise<AckResult> {
@@ -486,10 +729,30 @@ export class GameManager {
       this.scheduler.cancel(code);
       room.phase = "voting";
       room.timerEndsAt = null;
+      this.castAIVotes(room);
       await room.save();
       this.broadcast(room);
       this.notice(code, { type: "phase_voting" });
     });
+  }
+
+  /**
+   * Cast every AI participant's ballot the instant voting opens. AI votes are
+   * grounded in the hidden roles (see ai-players.ts). Humans then vote at their
+   * own pace; "all voted" fires once the humans finish.
+   */
+  private castAIVotes(room: RoomDoc) {
+    const connectedCount = room.players.filter((p) => p.connected).length;
+    const quota = clampImposters(room.settings.imposterCount, connectedCount);
+    const ballots = computeRoomAIBallots(room, quota);
+    for (const p of room.players) {
+      if (!p.isAI || p.role === null || p.hasVoted) continue;
+      const targets = ballots.get(p.userId);
+      if (targets && targets.length) {
+        p.hasVoted = true;
+        p.votedFor = targets.slice(0, quota);
+      }
+    }
   }
 
   async handleCastVote(code: string, voterId: string, targetIds: string[]): Promise<AckResult> {
@@ -599,7 +862,10 @@ export class GameManager {
     const imposterSet = new Set(imposterIds);
     const winnerSet = new Set(winners);
     const caughtSet = new Set(imposters.filter((i) => i.caught).map((i) => i.userId));
-    const participants = room.players.filter((p) => p.role !== null && p.connected);
+    // AI seats have no account — never write stats for them.
+    const participants = room.players.filter(
+      (p) => p.role !== null && p.connected && !p.isAI && !isAIUserId(p.userId),
+    );
 
     await Promise.all(
       participants.map((p) => {

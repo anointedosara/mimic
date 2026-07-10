@@ -34,3 +34,8 @@ export async function withGame<T>(fn: (m: GameManager) => Promise<T>): Promise<T
 export async function advanceRoom(code: string): Promise<void> {
   await withGame((m) => m.advancePhase(code));
 }
+
+/** One AI discussion turn, invoked by the scheduler callback (QStash / dev). */
+export async function runAITick(code: string): Promise<void> {
+  await withGame((m) => m.aiChatTick(code));
+}

@@ -3,7 +3,13 @@
 // single choke point that enforces the "hidden imposters" rule.
 
 import type { RoomDoc } from "@/lib/db/models/Room";
-import type { PrivateRole, PublicPlayer, PublicVote, RoomSnapshot } from "@/lib/game/types";
+import type {
+  ChatMessage,
+  PrivateRole,
+  PublicPlayer,
+  PublicVote,
+  RoomSnapshot,
+} from "@/lib/game/types";
 import { clampImposters } from "@/lib/game/config";
 
 export function buildPublicPlayers(room: RoomDoc): PublicPlayer[] {
@@ -23,9 +29,26 @@ export function buildPublicPlayers(room: RoomDoc): PublicPlayer[] {
       connected: p.connected,
       hasVoted: p.hasVoted,
       roundsWon: p.roundsWon,
+      isAI: p.isAI ?? false,
     });
   }
   return players;
+}
+
+/** Public projection of the room's chat log (oldest first). */
+export function buildPublicMessages(room: RoomDoc): ChatMessage[] {
+  return (room.messages ?? []).map((m) => ({
+    id: m.id,
+    userId: m.userId,
+    name: m.name,
+    avatar: m.avatar,
+    isAI: m.isAI ?? false,
+    text: m.text,
+    at: new Date(m.at).getTime(),
+    replyTo: m.replyTo ?? null,
+    reactions: (m.reactions ?? []).map((r) => ({ emoji: r.emoji, userIds: [...r.userIds] })),
+    scope: m.scope,
+  }));
 }
 
 export function buildPublicVotes(room: RoomDoc): PublicVote[] {
@@ -77,6 +100,7 @@ export function buildSnapshot(
     voteQuota,
     category: room.currentCategory,
     reveal,
+    messages: buildPublicMessages(room),
   };
 }
 

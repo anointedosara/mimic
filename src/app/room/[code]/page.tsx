@@ -8,6 +8,7 @@ import { Loader2, AlertTriangle } from "lucide-react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { useRoom, roomActions } from "@/hooks/use-room";
 import { useGameStore } from "@/store/game-store";
+import { useChatStore } from "@/store/chat-store";
 import { RoomBar } from "@/components/game/room-bar";
 import { VoiceBar } from "@/components/game/voice-bar";
 import { Lobby } from "@/components/game/lobby";
@@ -15,6 +16,7 @@ import { RoleReveal } from "@/components/game/role-reveal";
 import { Discussion } from "@/components/game/discussion";
 import { Voting } from "@/components/game/voting";
 import { Reveal } from "@/components/game/reveal";
+import { RoomChat } from "@/components/game/room-chat";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -41,6 +43,7 @@ export default function RoomPage() {
   function leave() {
     roomActions.leave(code);
     useGameStore.getState().reset();
+    useChatStore.getState().clearRoom();
     router.push("/");
   }
 
@@ -120,6 +123,13 @@ export default function RoomPage() {
             </ErrorBoundary>
           )}
         </div>
+
+        {/* Real-time room chat — available in the lobby and throughout the game. */}
+        {snapshot && snapshot.phase !== "ended" && (
+          <div className="mt-6">
+            <RoomChat code={code} selfId={selfId} />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { motion } from "framer-motion";
-import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye, Smartphone, Wifi, Bot } from "lucide-react";
+import { Play, PlusCircle, LogIn, HelpCircle, Shield, Zap, Users, Eye, Smartphone, Wifi, Bot, Trophy } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 import { Logo } from "@/components/logo";
 import { Button } from "@/components/ui/button";
@@ -61,7 +61,7 @@ export default function HomePage() {
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.45 }}
-          className="mt-10 flex w-full flex-col items-center gap-3 sm:w-auto sm:flex-row"
+          className="mt-10 flex w-full max-w-3xl flex-col items-center gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:justify-center"
         >
           <Button variant="gradient" size="lg" className="w-full sm:w-auto" onClick={() => go("/create-room")}>
             <Play className="h-5 w-5" /> Play now
@@ -93,6 +93,17 @@ export default function HomePage() {
             }}
           >
             <Bot className="h-5 w-5" /> Solo vs AI
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full sm:w-auto"
+            onClick={() => {
+              playSound("click");
+              router.push("/tournament");
+            }}
+          >
+            <Trophy className="h-5 w-5" /> Tournament
           </Button>
         </motion.div>
 
@@ -129,12 +140,12 @@ export default function HomePage() {
       {/* Game modes */}
       <section className="container mt-24">
         <div className="text-center">
-          <h2 className="font-display text-3xl font-black sm:text-4xl">Three ways to play</h2>
+          <h2 className="font-display text-3xl font-black sm:text-4xl">Four ways to play</h2>
           <p className="mx-auto mt-2 max-w-md text-muted-foreground">
-            Online with friends, passed around one phone, or solo against AI.
+            Online with friends, passed around one phone, solo against AI, or a survival tournament.
           </p>
         </div>
-        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
@@ -146,8 +157,8 @@ export default function HomePage() {
             </div>
             <h3 className="font-display text-xl font-bold">Online</h3>
             <p className="mt-1 flex-1 text-sm text-muted-foreground">
-              Private room links and codes, real-time multiplayer across every device, with logins
-              and saved stats.
+              Private rooms, real-time multiplayer, live chat with reactions, and saved stats. Short on
+              friends? Fill empty seats with AI and start right away.
             </p>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
               <Button variant="gradient" className="flex-1" onClick={() => go("/create-room")}>
@@ -213,6 +224,36 @@ export default function HomePage() {
                 }}
               >
                 <Play className="h-4 w-4" /> Play against AI
+              </Button>
+            </div>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ delay: 0.24 }}
+            className="glass card-hover flex flex-col rounded-2xl p-6"
+          >
+            <div className="mb-3 grid h-12 w-12 place-items-center rounded-xl bg-mimic-amber/15 text-mimic-amber">
+              <Trophy className="h-6 w-6" />
+            </div>
+            <h3 className="font-display text-xl font-bold">Survival Tournament</h3>
+            <p className="mt-1 flex-1 text-sm text-muted-foreground">
+              One vote-off per round until a side is left standing. Imposters hide across rounds, losers
+              become spectators, and every elimination is a cinematic reveal. Part party game, part
+              reality show.
+            </p>
+            <div className="mt-4">
+              <Button
+                variant="gradient"
+                className="w-full"
+                onClick={() => {
+                  playSound("click");
+                  router.push("/tournament");
+                }}
+              >
+                <Play className="h-4 w-4" /> Enter the arena
               </Button>
             </div>
           </motion.div>
